@@ -1,0 +1,104 @@
+import mongoose, { Document, Schema } from 'mongoose';
+import bcrypt from 'bcryptjs';
+
+export interface IAddress {
+  street: string;
+  city: string;
+  state: string;
+  zip: string;
+}
+
+export interface IUser extends Document {
+  email: string;
+  password: string;
+  firstName: string;
+  lastName: string;
+  phone?: string;
+  billingAddress: IAddress;
+  shippingAddress: IAddress;
+  role: 'user' | 'admin';
+  emailVerified: boolean;
+  resetPasswordToken?: string;
+  resetPasswordExpire?: Date;
+  createdAt: Date;
+  updatedAt: Date;
+  comparePassword(candidatePassword: string): Promise<boolean>;
+}
+
+const AddressSchema = new Schema<IAddress>({
+  street: { type: String, required: true },
+  city: { type: String, required: true },
+  state: { type: String, required: true },
+  zip: { type: String, required: true },
+}, { _id: false });
+
+const UserSchema = new Schema<IUser>({
+  email: {
+    type: String,
+    required: [true, 'Please provide an email'],
+    unique: true,
+    lowercase: true,
+    trim: true,
+    match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
+  },
+  password: {
+    type: String,
+    required: [true, 'Please provide a password'],
+    minlength: [6, 'Password must be at least 6 characters'],
+    select: false, // Don't return password by default
+  },
+  firstName: {
+    type: String,
+    required: [true, 'Please provide a first name'],
+    trim: true,
+  },
+  lastName: {
+    type: String,
+    required: [true, 'Please provide a last name'],
+    trim: true,
+  },
+  phone: {
+    type: String,
+    trim: true,
+  },
+  billingAddress: {
+    type: AddressSchema,
+    required: true,
+  },
+  shippingAddress: {
+    type: AddressSchema,
+    required: true,
+  },
+  role: {
+    type: String,
+    enum: ['user', 'admin'],
+    default: 'user',
+  },
+  emailVerified: {
+    type: Boolean,
+    default: false,
+  },
+  resetPasswordToken: String,
+  resetPasswordExpire: Date,
+}, {
+  timestamps: true,
+});
+
+// Hash password before saving
+UserSchema.pre('save', async function (next) {
+  if (!this.isModified('password')) {
+    return next();
+  }
+  
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+  next();
+});
+
+// Method to compare password
+UserSchema.methods.comparePassword = async function (candidatePassword: string): Promise<boolean> {
+  return await bcrypt.compare(candidatePassword, this.password);
+};
+
+export const User = mongoose.model<IUser>('User', UserSchema);
+
