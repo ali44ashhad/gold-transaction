@@ -16,7 +16,7 @@ export interface IUser extends Document {
   phone?: string;
   billingAddress: IAddress;
   shippingAddress: IAddress;
-  role: 'user' | 'admin';
+  role: 'admin' | 'user';
   emailVerified: boolean;
   resetPasswordToken?: string;
   resetPasswordExpire?: Date;
@@ -35,7 +35,7 @@ const AddressSchema = new Schema<IAddress>({
 const UserSchema = new Schema<IUser>({
   email: {
     type: String,
-    required: [true, 'Please provide an email'],
+    required: [true, 'Email is required'],
     unique: true,
     lowercase: true,
     trim: true,
@@ -43,18 +43,18 @@ const UserSchema = new Schema<IUser>({
   },
   password: {
     type: String,
-    required: [true, 'Please provide a password'],
+    required: [true, 'Password is required'],
     minlength: [6, 'Password must be at least 6 characters'],
-    select: false, // Don't return password by default
+    select: false, // Don't include password in queries by default
   },
   firstName: {
     type: String,
-    required: [true, 'Please provide a first name'],
+    required: [true, 'First name is required'],
     trim: true,
   },
   lastName: {
     type: String,
-    required: [true, 'Please provide a last name'],
+    required: [true, 'Last name is required'],
     trim: true,
   },
   phone: {
@@ -71,15 +71,21 @@ const UserSchema = new Schema<IUser>({
   },
   role: {
     type: String,
-    enum: ['user', 'admin'],
+    enum: ['admin', 'user'],
     default: 'user',
   },
   emailVerified: {
     type: Boolean,
     default: false,
   },
-  resetPasswordToken: String,
-  resetPasswordExpire: Date,
+  resetPasswordToken: {
+    type: String,
+    select: false,
+  },
+  resetPasswordExpire: {
+    type: Date,
+    select: false,
+  },
 }, {
   timestamps: true,
 });
@@ -99,6 +105,9 @@ UserSchema.pre('save', async function (next) {
 UserSchema.methods.comparePassword = async function (candidatePassword: string): Promise<boolean> {
   return await bcrypt.compare(candidatePassword, this.password);
 };
+
+// Index for email
+UserSchema.index({ email: 1 });
 
 export const User = mongoose.model<IUser>('User', UserSchema);
 

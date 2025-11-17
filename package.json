@@ -1,7 +1,7 @@
 {
   "name": "pharaohvault-backend",
   "version": "1.0.0",
-  "description": "PharaohVault Backend API",
+  "description": "PharaohVault Backend API with Express, MongoDB, and TypeScript",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -15,24 +15,22 @@
   "dependencies": {
     "express": "^4.18.2",
     "mongoose": "^8.0.3",
-    "jsonwebtoken": "^9.0.2",
-    "bcryptjs": "^2.4.3",
-    "cookie-parser": "^1.4.6",
-    "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "express-validator": "^7.0.1",
-    "nodemailer": "^6.9.7"
+    "cors": "^2.8.5",
+    "cookie-parser": "^1.4.6",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "express-validator": "^7.0.1"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
-    "@types/node": "^20.10.5",
-    "@types/jsonwebtoken": "^9.0.5",
-    "@types/bcryptjs": "^2.4.6",
-    "@types/cookie-parser": "^1.4.6",
+    "@types/node": "^20.10.6",
     "@types/cors": "^2.8.17",
-    "@types/nodemailer": "^6.4.14",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.3"
+    "@types/cookie-parser": "^1.4.6",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.5",
+    "typescript": "^5.3.3",
+    "tsx": "^4.7.0"
   }
 }
 
