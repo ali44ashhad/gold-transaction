@@ -1,3 +1,4 @@
+// src/index.ts
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
@@ -5,13 +6,14 @@ import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import { connectDB } from './config/database';
 import authRoutes from './routes/auth';
+import checkoutRouter, { webhookHandler } from './routes/checkout';
+import bodyParser from 'body-parser';
 import userRoutes from './routes/users';
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5005;
 
 // Connect to MongoDB
 connectDB().catch((error) => {
@@ -19,7 +21,7 @@ connectDB().catch((error) => {
   process.exit(1);
 });
 
-// Middleware
+// CORS
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true,
@@ -27,6 +29,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
+ 
+app.post(
+  '/api/checkout/webhook',
+  bodyParser.raw({ type: 'application/json' }),
+  (req, res) => webhookHandler(req, res)
+);
+ 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -34,6 +43,7 @@ app.use(cookieParser());
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/checkout', checkoutRouter);
 
 // Health check route
 app.get('/api/health', (_req, res) => {
@@ -85,4 +95,3 @@ app.listen(PORT, () => {
   console.log(`📦 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`🌐 Health check: http://localhost:${PORT}/api/health`);
 });
-
