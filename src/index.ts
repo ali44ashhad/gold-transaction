@@ -11,6 +11,7 @@ import bodyParser from 'body-parser';
 import userRoutes from './routes/users';
 import subscriptionRoutes from './routes/subscriptions';
 import metalPriceRoutes from './routes/metalPrices';
+import orderRoutes from './routes/orders';
 import { startMetalPriceCron } from './jobs/metalPriceScheduler';
 
 dotenv.config();
@@ -51,6 +52,7 @@ app.use(cookieParser());
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/checkout', checkoutRouter);
+app.use('/api/orders', orderRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/metal-prices', metalPriceRoutes);
 

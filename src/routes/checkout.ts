@@ -1,419 +1,614 @@
-// // src/routes/checkout.ts
-// import express from 'express';
-// import { stripe } from '../stripe';
-// import { authenticate } from '../middleware/auth';
-// import { Order } from '../models/Order';
-// import Stripe from 'stripe';
-
-// const router = express.Router();
-
-// /**
-//  * Basic route info
-//  */
-// router.get('/', (req, res) => {
-//   res.json({
-//     message: 'Checkout routes: POST /create-checkout-session (protected), POST /webhook (raw)',
-//     endpoints: [
-//       { method: 'POST', path: '/api/checkout/create-checkout-session' },
-//       { method: 'POST', path: '/api/checkout/webhook' }
-//     ]
-//   });
-// });
-
-
-// router.post('/create-checkout-session', authenticate, async (req, res) => {
-//   try {
-//     const userId = (req as any).user?.userId;
-//     let { amount, currency = 'inr', productName = 'Gold Item' } = req.body;
-
-//     if (typeof amount !== 'number' || amount <= 0) {
-//       return res.status(400).json({ error: 'amount must be a positive number' });
-//     }
-
-//     // 🔥 If frontend is sending rupees → convert to paise
-//     // Example: 100 → 10000
-//     const amountInPaise = Math.round(amount * 100);
-
-//     // create order (save rupees or paise — your choice, I saved rupees to DB)
-//     const order = await Order.create({
-//       user: userId,
-//       amount: amount,     // storing rupees
-//       currency,
-//       status: 'pending',
-//     });
-
-//     // create stripe checkout session
-//     const session = await stripe.checkout.sessions.create({
-//       payment_method_types: ['card'],
-//       mode: 'payment',
-//       line_items: [
-//         {
-//           price_data: {
-//             currency,
-//             product_data: { name: productName },
-//             unit_amount: amountInPaise,   // 🔥 Stripe always needs smallest unit
-//           },
-//           quantity: 1,
-//         },
-//       ],
-//       metadata: { orderId: order._id.toString(), userId }, 
-//       success_url: `${process.env.BASE_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-//       cancel_url: `${process.env.BASE_URL}/cancel`,
-//     });
-
-//     order.stripeSessionId = session.id;
-//     await order.save();
-
-//     res.json({ url: session.url, id: session.id });
-
-//   } catch (err: any) {
-//     console.error('create-checkout-session error:', err);
-//     res.status(500).json({ error: 'Could not create checkout session' });
-//   }
-// });
-
-
-// /**
-//  * Webhook handler function (must be mounted with raw body parser)
-//  * Exported so index.ts can mount it with bodyParser.raw(...) BEFORE express.json()
-//  */
-// export async function webhookHandler(req: express.Request, res: express.Response) {
-//   const sig = req.headers['stripe-signature'] as string | undefined;
-//   const webhookSecret = process.env.WEBHOOK_SECRET as string | undefined;
-//   if (!sig || !webhookSecret) {
-//     console.warn('Missing webhook signature or webhook secret');
-//     return res.status(400).send('Missing webhook signature/secret');
-//   }
-
-//   let event: Stripe.Event;
-//   try {
-//     // Important: req.body must be raw Buffer when this function is called
-//     event = stripe.webhooks.constructEvent(req.body as Buffer, sig, webhookSecret);
-//   } catch (err: any) {
-//     console.error('Webhook signature verification failed:', err?.message || err);
-//     return res.status(400).send(`Webhook Error: ${err?.message || 'signature verification failed'}`);
-//   }
-
-//   try {
-//     // Handle checkout.session.completed
-//     if (event.type === 'checkout.session.completed') {
-//       const session = event.data.object as Stripe.Checkout.Session;
-//       const orderId = session.metadata?.orderId;
-
-//       if (orderId) {
-//         const order = await Order.findById(orderId);
-//         if (order) {
-//           order.status = 'paid';
-//           order.stripeSessionId = session.id;
-//           await order.save();
-//           console.log('Order marked paid:', orderId);
-//         } else {
-//           console.warn('Order not found for id from metadata:', orderId);
-//         }
-//       } else {
-//         // fallback: find by stripeSessionId
-//         const order = await Order.findOne({ stripeSessionId: session.id });
-//         if (order) {
-//           order.status = 'paid';
-//           await order.save();
-//           console.log('Order found by session id and marked paid:', session.id);
-//         } else {
-//           console.warn('Order not found for session id:', session.id);
-//         }
-//       }
-//     }
-
-//     // Add other event types if you need (payment_intent.succeeded, charge.refunded, etc.)
-//   } catch (dbErr) {
-//     console.error('Error processing webhook event:', dbErr);
-//     // still return 200/2xx? Stripe will retry on non-2xx — here return 500 to let Stripe retry.
-//     return res.status(500).send('Internal processing error');
-//   }
-
-//   // Respond to Stripe with 2xx to acknowledge receipt
-//   res.json({ received: true });
-// }
-
-// export default router;
-
-// src/routes/checkout.ts
-import express from 'express';
-import { stripe } from '../stripe';
-import { Order } from '../models/Order';
-import dotenv from 'dotenv';
-import { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import Stripe from 'stripe';
+import dotenv from 'dotenv';
+
+import { stripe } from '../stripe';
+import { Order, IOrder, PaymentStatus } from '../models/Order';
+import type { MetalType, UnitType } from '../models/Subscription';
+import { authenticate } from '../middleware/auth';
+import { notifyOps } from '../utils/alerting';
+import { validateCreateSessionPayload, CreateSessionPayload } from '../validators/checkoutValidators';
+import { syncSubscriptionFromOrder, applyStripeSubscriptionEvent } from '../services/subscriptionSync';
 
 dotenv.config();
 
 const router = express.Router();
 
- 
-// router.post('/create-session', async (req: Request, res: Response) => {
-//   try {
-//     const { amount, currency = 'inr', userId, metadata } = req.body;
+const DEFAULT_PRODUCT_NAME = 'Custom Monthly Subscription';
+const DEFAULT_DESCRIPTION = 'Subscription created via PharaohVault backend';
 
-//     if (!amount || Number(amount) <= 0) {
-//       return res.status(400).json({ error: 'Invalid amount' });
-//     }
+type CheckoutMode = Stripe.Checkout.SessionCreateParams.Mode;
+type SubscriptionDetailsInput = CreateSessionPayload['subscriptionDetails'];
 
-//     const unitAmount = Math.round(Number(amount) * 100); // INR -> paise
+type NormalizedSubscriptionConfig = {
+  planName: string;
+  metal: MetalType;
+  targetWeight: number;
+  targetUnit: UnitType;
+  monthlyInvestment: number;
+  quantity: number;
+  targetPrice: number;
+};
 
-//     // Create an Order in DB with status pending
-//     const order = new Order({
-//       user: userId ? new mongoose.Types.ObjectId(userId) : undefined,
-//       amount: Number(amount),
-//       currency,
-//       status: 'pending',
-//       metadata: metadata || {},
-//     });
+export const sanitizeMetadata = (metadata: unknown): Record<string, string> => {
+  if (!metadata || typeof metadata !== 'object') {
+    return {};
+  }
 
-//     await order.save();
+  return Object.entries(metadata as Record<string, unknown>).reduce<Record<string, string>>(
+    (acc, [key, value]) => {
+      if (value === undefined || value === null) {
+        return acc;
+      }
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        acc[key] = String(value);
+      }
+      return acc;
+    },
+    {}
+  );
+};
 
-//     // Create a Checkout Session with dynamic recurring price (monthly)
-//     // Using price_data so we don't need to persist Price objects in Stripe.
-//     const session = await stripe.checkout.sessions.create({
-//       mode: 'subscription',
-//       line_items: [
-//         {
-//           price_data: {
-//             currency,
-//             product_data: {
-//               name: 'Custom Monthly Subscription',
-//               description: `Monthly subscription — ₹${Number(amount)}`,
-//             },
-//             unit_amount: unitAmount,
-//             recurring: {
-//               interval: 'month',
-//             },
-//           },
-//           quantity: 1,
-//         },
-//       ],
-//       // Attach order id to session metadata so webhook can find the order
-//       metadata: {
-//         orderId: order._id.toString(),
-//         ...(metadata || {}),
-//       },
-//       subscription_data: {
-//         metadata: {
-//           orderId: order._id.toString(),
-//         },
-//       },
-//       success_url: `${process.env.BASE_URL || 'http://localhost:5005'}/success?session_id={CHECKOUT_SESSION_ID}`,
-//       cancel_url: `${process.env.BASE_URL || 'http://localhost:5005'}/cancel`,
-//     });
+const ensureBaseUrl = () => {
+  const url = process.env.FRONTEND_URL || process.env.BASE_URL || 'http://localhost:5005';
+  return url.replace(/\/$/, '');
+};
 
-//     // Save stripeSessionId so we can correlate later
-//     order.stripeSessionId = session.id;
-//     await order.save();
+const toPositiveNumber = (value: unknown, fallback: number): number => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  return num > 0 ? num : fallback;
+};
 
-//     return res.json({ url: session.url, sessionId: session.id, orderId: order._id });
-//   } catch (err: any) {
-//     console.error('create-session error', err);
-//     return res.status(500).json({ error: 'Failed to create checkout session' });
-//   }
-// });
+const toNonNegativeNumber = (value: unknown, fallback: number): number => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+  return num >= 0 ? num : fallback;
+};
 
-router.post('/create-session', async (req: Request, res: Response) => {
+const normalizeSubscriptionConfig = (
+  details: SubscriptionDetailsInput,
+  metadata: Record<string, string>,
+  amount: number,
+  productName: string,
+  quantity: number
+): NormalizedSubscriptionConfig => {
+  const rawPlanName = details?.planName ?? metadata.planName ?? metadata.plan;
+  const planName = rawPlanName?.trim() || productName || DEFAULT_PRODUCT_NAME;
+  const metal = (details?.metal ?? metadata.metal) === 'silver' ? 'silver' : 'gold';
+  const targetUnit = (details?.targetUnit ?? metadata.targetUnit) === 'g' ? 'g' : 'oz';
+  const targetWeight = toPositiveNumber(details?.targetWeight ?? metadata.targetWeight, 1);
+  const monthlyInvestment = toPositiveNumber(
+    details?.monthlyInvestment ?? metadata.monthlyInvestment,
+    amount
+  );
+  const normalizedQuantity = toPositiveNumber(details?.quantity ?? metadata.quantity, quantity);
+  const targetPrice = toNonNegativeNumber(details?.targetPrice ?? metadata.targetPrice, 0);
+
+  return {
+    planName,
+    metal,
+    targetUnit,
+    targetWeight,
+    monthlyInvestment,
+    quantity: normalizedQuantity,
+    targetPrice,
+  };
+};
+
+const asObjectId = (value?: string): mongoose.Types.ObjectId | undefined => {
+  if (!value || !mongoose.Types.ObjectId.isValid(value)) {
+    return undefined;
+  }
+  return new mongoose.Types.ObjectId(value);
+};
+
+router.post('/create-session', authenticate, validateCreateSessionPayload, async (req: Request, res: Response) => {
   try {
-    console.log("🔥 Incoming Request to /create-session");
-    console.log("Body:", req.body);
+    if (!req.user?.userId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
-    const { amount, currency = 'inr', userId, metadata } = req.body;
+    const {
+      amount,
+      currency = 'inr',
+      metadata,
+      mode = 'subscription',
+      productName = DEFAULT_PRODUCT_NAME,
+      description = DEFAULT_DESCRIPTION,
+      interval = 'month',
+      intervalCount = 1,
+      quantity = 1,
+      customerEmail,
+      subscriptionDetails,
+    } = req.body as CreateSessionPayload;
 
-    if (!amount || Number(amount) <= 0) {
-      console.log("❌ Invalid amount received:", amount);
+    const normalizedAmount = Number(amount);
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
       return res.status(400).json({ error: 'Invalid amount' });
     }
 
-    const unitAmount = Math.round(Number(amount) * 100);
+    const unitAmount = Math.round(normalizedAmount * 100);
+    const normalizedCurrency = String(currency).toLowerCase();
+    const checkoutMode: CheckoutMode = mode === 'payment' ? 'payment' : 'subscription';
+    const normalizedSubscriptionDetails =
+      checkoutMode === 'subscription' ? subscriptionDetails : undefined;
+    const sanitizedMetadata = sanitizeMetadata({
+      ...metadata,
+      ...(normalizedSubscriptionDetails
+        ? {
+            planName: normalizedSubscriptionDetails.planName,
+            metal: normalizedSubscriptionDetails.metal,
+            targetWeight: normalizedSubscriptionDetails.targetWeight,
+            targetUnit: normalizedSubscriptionDetails.targetUnit,
+            monthlyInvestment: normalizedSubscriptionDetails.monthlyInvestment,
+            quantity: normalizedSubscriptionDetails.quantity,
+            targetPrice: normalizedSubscriptionDetails.targetPrice,
+          }
+        : {}),
+      userId: req.user.userId,
+    });
+    const normalizedSubscriptionConfig =
+      checkoutMode === 'subscription'
+        ? normalizeSubscriptionConfig(
+            normalizedSubscriptionDetails,
+            sanitizedMetadata,
+            normalizedAmount,
+            productName,
+            quantity
+          )
+        : undefined;
 
-    const orderData: any = {
-      amount: Number(amount),
-      currency,
+    const order = await Order.create({
+      user: asObjectId(req.user.userId),
+      orderType: checkoutMode === 'payment' ? 'one_time' : 'subscription',
+      amount: normalizedAmount,
+      amountInMinor: unitAmount,
+      currency: normalizedCurrency,
       status: 'pending',
-      metadata: metadata || {},
-    };
-
-    if (userId) {
-      orderData.user = new mongoose.Types.ObjectId(userId);
-    }
-
-    console.log("📝 Order data to save:", orderData);
-
-    const order = new Order(orderData);
-    await order.save();
-
-    console.log("💾 Order saved:", order);
-
-    const session = await stripe.checkout.sessions.create({
-      mode: 'subscription',
-      line_items: [
-        {
-          price_data: {
-            currency,
-            product_data: {
-              name: 'Custom Monthly Subscription',
-              description: `Monthly subscription — ₹${Number(amount)}`,
-            },
-            unit_amount: unitAmount,
-            recurring: { interval: 'month' },
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: { orderId: order._id.toString(), ...(metadata || {}) },
-      subscription_data: { metadata: { orderId: order._id.toString() } },
-      success_url: `${process.env.BASE_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.BASE_URL}/cancel`,
+      paymentStatus: 'pending',
+      invoiceStatus: 'none',
+      productName,
+      productDescription: description,
+      billingEmail: customerEmail,
+      metadata: sanitizedMetadata,
+      subscriptionConfig: normalizedSubscriptionConfig,
     });
 
-    console.log("🎉 Stripe Session Created:", session);
+    const orderId = order.id;
+    const baseUrl = ensureBaseUrl();
+    const encodedOrderId = encodeURIComponent(orderId);
+
+    const lineItem: Stripe.Checkout.SessionCreateParams.LineItem = {
+      price_data: {
+        currency: normalizedCurrency,
+        product_data: {
+          name: productName,
+          description,
+        },
+        unit_amount: unitAmount,
+      },
+      quantity: Number(quantity) > 0 ? Number(quantity) : 1,
+    };
+
+    if (checkoutMode === 'subscription') {
+      lineItem.price_data!.recurring = {
+        interval: interval === 'year' ? 'year' : 'month',
+        interval_count: Number(intervalCount) > 0 ? Number(intervalCount) : 1,
+      };
+    }
+
+    const sessionParams: Stripe.Checkout.SessionCreateParams = {
+      mode: checkoutMode,
+      line_items: [lineItem],
+      metadata: {
+        orderId,
+        ...sanitizedMetadata,
+      },
+      success_url: `${baseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}&order_id=${encodedOrderId}`,
+      cancel_url: `${baseUrl}/checkout/cancel?order_id=${encodedOrderId}`,
+    };
+
+    if (checkoutMode === 'subscription') {
+      sessionParams.subscription_data = {
+        metadata: {
+          orderId,
+          ...sanitizedMetadata,
+        },
+      };
+    }
+
+    if (customerEmail) {
+      sessionParams.customer_email = customerEmail;
+    }
+
+    const session = await stripe.checkout.sessions.create(sessionParams);
 
     order.stripeSessionId = session.id;
+    if (session.customer) {
+      order.stripeCustomerId = typeof session.customer === 'string' ? session.customer : session.customer.id;
+    }
+    order.latestStripeEvent = 'checkout.session.created';
     await order.save();
-
-    console.log("📌 Order updated with stripeSessionId:", order);
 
     return res.json({
       url: session.url,
       sessionId: session.id,
-      orderId: order._id
+      orderId,
+      expiresAt: session.expires_at ? session.expires_at * 1000 : undefined,
     });
   } catch (err: any) {
-    console.error("❌ ERROR in /create-session:", err);
+    console.error('create-session error', err);
     return res.status(500).json({
-      error: "Failed to create checkout session",
+      error: 'Failed to create checkout session',
       details: err.message,
     });
   }
 });
 
+type OrderLookup = {
+  orderId?: string | null;
+  stripeSessionId?: string | null;
+  stripeSubscriptionId?: string | null;
+  stripeInvoiceId?: string | null;
+};
 
-/**
- * Webhook handler function (exported) - index.ts routes raw body to this
- * Verify signature using process.env.WEBHOOK_SECRET
- */
-// export const webhookHandler = async (req: any, res: Response) => {
-//   const signature = req.headers['stripe-signature'];
-//   const webhookSecret = process.env.WEBHOOK_SECRET;
+const mapSubscriptionStatus = (
+  status: Stripe.Subscription.Status
+): Pick<IOrder, 'status' | 'paymentStatus'> => {
+  switch (status) {
+    case 'active':
+      return { status: 'paid', paymentStatus: 'succeeded' };
+    case 'trialing':
+    case 'incomplete':
+    case 'incomplete_expired':
+      return { status: 'pending', paymentStatus: 'pending' };
+    case 'canceled':
+    case 'unpaid':
+      return { status: 'cancelled', paymentStatus: 'failed' };
+    case 'past_due':
+      return { status: 'pending', paymentStatus: 'pending' };
+    default:
+      return { status: 'pending', paymentStatus: 'pending' };
+  }
+};
 
-//   let event;
+type StripeEventContext = {
+  eventId: string;
+  eventType: string;
+  deliveredAt: Date;
+};
 
-//   try {
-//     if (!webhookSecret) {
-//       throw new Error('Missing WEBHOOK_SECRET in environment');
-//     }
-//     // req.body is raw body because index.ts uses bodyParser.raw for this route
-//     event = stripe.webhooks.constructEvent(req.body, signature as string, webhookSecret);
-//   } catch (err: any) {
-//     console.error('Webhook signature verification failed.', err.message);
-//     return res.status(400).send(`Webhook Error: ${err.message}`);
-//   }
+export const updateOrderByLookup = async (
+  lookup: OrderLookup,
+  updates: Partial<IOrder>,
+  context?: StripeEventContext
+) => {
+  const filters: Record<string, any>[] = [];
 
-//   try {
-//     // Handle important events
-//     switch (event.type) {
-//       // Called when Checkout Session completes (subscription created)
-//       case 'checkout.session.completed': {
-//         const session = event.data.object as any;
-//         const orderId = session.metadata?.orderId;
+  if (lookup.orderId && mongoose.Types.ObjectId.isValid(lookup.orderId)) {
+    filters.push({ _id: lookup.orderId });
+  }
+  if (lookup.stripeSessionId) {
+    filters.push({ stripeSessionId: lookup.stripeSessionId });
+  }
+  if (lookup.stripeSubscriptionId) {
+    filters.push({ stripeSubscriptionId: lookup.stripeSubscriptionId });
+  }
+  if (lookup.stripeInvoiceId) {
+    filters.push({ stripeInvoiceId: lookup.stripeInvoiceId });
+  }
 
-//         if (orderId) {
-//           await Order.findByIdAndUpdate(orderId, { status: 'paid', stripeSessionId: session.id });
-//           console.log(`Order ${orderId} marked paid via checkout.session.completed`);
-//         } else {
-//           // fallback: find by session id
-//           await Order.findOneAndUpdate({ stripeSessionId: session.id }, { status: 'paid' });
-//         }
-//         break;
-//       }
+  for (const filter of filters) {
+    const order = await Order.findOne(filter);
+    if (!order) {
+      continue;
+    }
 
-//       // Invoice payment succeeded (recurring payment succeeded)
-//       case 'invoice.payment_succeeded': {
-//         const invoice = event.data.object as any;
-//         // invoice contains subscription and lines. We can log or update records.
-//         const subId = invoice.subscription;
-//         console.log('Invoice payment succeeded for subscription:', subId);
+    if (context && order.latestStripeEventId === context.eventId) {
+      console.info('Stripe webhook: duplicate event skipped', {
+        eventId: context.eventId,
+        orderId: order.id,
+      });
+      return order;
+    }
 
-//         // If you stored order metadata on the subscription or the invoice, update corresponding order
-//         // Try to read orderId from invoice lines or metadata
-//         const orderId = invoice?.metadata?.orderId;
-//         if (orderId) {
-//           await Order.findByIdAndUpdate(orderId, { status: 'paid' });
-//         }
-//         break;
-//       }
+    Object.assign(order, updates);
+    if (context) {
+      order.latestStripeEvent = context.eventType;
+      order.latestStripeEventId = context.eventId;
+      order.latestStripeEventReceivedAt = context.deliveredAt;
+    }
 
-//       // Subscription cancelled or unpaid, update order(s) if desired
-//       case 'customer.subscription.deleted': {
-//         const subscription = event.data.object as any;
-//         console.log('Subscription cancelled', subscription.id);
-//         // If you stored orderId on subscription metadata you could mark order cancelled
-//         const orderId = subscription?.metadata?.orderId;
-//         if (orderId) {
-//           await Order.findByIdAndUpdate(orderId, { status: 'cancelled' });
-//         }
-//         break;
-//       }
+    await order.save();
+    return order;
+  }
 
-//       default:
-//         // Unhandled events
-//         // console.log(`Unhandled event type ${event.type}`);
-//         break;
-//     }
+  await notifyOps('Stripe webhook could not match order', {
+    lookup,
+    eventId: context?.eventId,
+    eventType: context?.eventType,
+  });
 
-//     res.json({ received: true });
-//   } catch (err: any) {
-//     console.error('Error handling webhook event', err);
-//     res.status(500).send();
-//   }
-// };
-export const webhookHandler = async (req: any, res: Response) => {
-  console.log("⚡ Stripe Webhook Received");
-  console.log("Headers:", req.headers);
-  console.log("Raw Body:", req.body.toString());
+  return null;
+};
 
-  const signature = req.headers["stripe-signature"];
-  const webhookSecret = process.env.WEBHOOK_SECRET;
+const ensureWebhookSecret = () => {
+  if (!process.env.WEBHOOK_SECRET) {
+    throw new Error('Missing WEBHOOK_SECRET in environment');
+  }
+  return process.env.WEBHOOK_SECRET;
+};
 
-  let event;
+const asStripeId = <T extends { id: string } | string | null | undefined>(value: T): string | undefined => {
+  if (!value) return undefined;
+  return typeof value === 'string' ? value : value.id;
+};
 
+const getInvoiceSubscriptionId = (invoice: Stripe.Invoice): string | undefined => {
+  const subscriptionCandidate = (invoice as Stripe.Invoice & {
+    subscription?: string | Stripe.Subscription | null;
+  }).subscription;
+  return asStripeId(subscriptionCandidate ?? null);
+};
+
+const getInvoicePaymentIntentId = (invoice: Stripe.Invoice): string | undefined => {
+  const paymentIntentCandidate = (invoice as Stripe.Invoice & {
+    payment_intent?: string | Stripe.PaymentIntent | null;
+  }).payment_intent;
+  return asStripeId(paymentIntentCandidate ?? null);
+};
+
+const getInvoicePeriodEndDate = (invoice: Stripe.Invoice): Date | undefined => {
+  const line = invoice.lines?.data?.[0];
+  const periodEnd = line?.period?.end;
+  return periodEnd ? new Date(periodEnd * 1000) : undefined;
+};
+
+const harmlessStripeEvents = new Set<string>([
+  'charge.succeeded',
+  'charge.failed',
+  'payment_method.attached',
+  'payment_method.detached',
+  'payment_intent.created',
+  'payment_intent.succeeded',
+  'payment_intent.payment_failed',
+  'customer.created',
+  'customer.updated',
+  'invoice.created',
+  'invoice.finalized',
+  'invoice.paid',
+  'invoice_payment.paid',
+]);
+
+export const buildPaymentStatus = (status?: string): PaymentStatus => {
+  if (!status) return 'pending';
+  if (status === 'paid' || status === 'succeeded') return 'succeeded';
+  if (status === 'unpaid' || status === 'failed') return 'failed';
+  if (status === 'processing') return 'processing';
+  if (status === 'requires_payment_method') return 'requires_payment_method';
+  if (status === 'requires_action') return 'requires_action';
+  if (status === 'refunded') return 'refunded';
+  return 'pending';
+};
+
+export const processStripeEvent = async (event: Stripe.Event): Promise<void> => {
+  const context: StripeEventContext = {
+    eventId: event.id,
+    eventType: event.type,
+    deliveredAt: new Date(),
+  };
+  
+
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const update: Partial<IOrder> = {
+        latestStripeEvent: event.type,
+        status: session.payment_status === 'paid' ? 'paid' : 'pending',
+        paymentStatus: buildPaymentStatus(session.payment_status),
+        billingEmail: session.customer_details?.email ?? undefined,
+        billingName: session.customer_details?.name ?? undefined,
+        stripeCustomerId: asStripeId(session.customer),
+        stripeSubscriptionId: asStripeId(session.subscription),
+        stripePaymentIntentId: asStripeId(session.payment_intent as any),
+        stripeInvoiceId: asStripeId(session.invoice as any),
+        amountInMinor: session.amount_total ?? undefined,
+        amount:
+          session.amount_total !== null && session.amount_total !== undefined
+            ? session.amount_total / 100
+            : undefined,
+        currency: session.currency ?? undefined,
+      };
+
+      const updated = await updateOrderByLookup(
+        {
+          orderId: session.metadata?.orderId,
+          stripeSessionId: session.id,
+          stripeSubscriptionId: asStripeId(session.subscription),
+        },
+        update,
+        context
+      );
+
+      if (!updated) {
+        console.warn('Stripe webhook: no order matched checkout.session.completed', {
+          sessionId: session.id,
+          metadataOrderId: session.metadata?.orderId,
+        });
+      } else if (updated.orderType === 'subscription') {
+        await syncSubscriptionFromOrder(updated, {
+          status: 'pending_payment',
+          stripeSubscriptionId: asStripeId(session.subscription),
+        });
+      }
+      break;
+    }
+
+    case 'invoice.payment_succeeded': {
+      const invoice = event.data.object as Stripe.Invoice;
+      const invoiceSubscriptionId = getInvoiceSubscriptionId(invoice);
+      const periodEnd = getInvoicePeriodEndDate(invoice);
+      const amountPaidMajor =
+        invoice.amount_paid !== null && invoice.amount_paid !== undefined
+          ? invoice.amount_paid / 100
+          : undefined;
+      const update: Partial<IOrder> = {
+        latestStripeEvent: event.type,
+        status: 'paid',
+        paymentStatus: 'succeeded',
+        invoiceStatus: invoice.status ?? 'paid',
+        stripeInvoiceId: invoice.id,
+        stripeSubscriptionId: invoiceSubscriptionId,
+        stripeCustomerId: asStripeId(invoice.customer),
+        stripePaymentIntentId: getInvoicePaymentIntentId(invoice),
+        receiptUrl: invoice.hosted_invoice_url ?? invoice.invoice_pdf ?? undefined,
+        amountInMinor: invoice.amount_paid ?? invoice.amount_due ?? undefined,
+        amount: amountPaidMajor,
+        currency: invoice.currency ?? undefined,
+      };
+
+      const updated = await updateOrderByLookup(
+        {
+          orderId: invoice.metadata?.orderId,
+          stripeSubscriptionId: invoiceSubscriptionId,
+          stripeInvoiceId: invoice.id,
+        },
+        update,
+        context
+      );
+
+      if (!updated) {
+        console.warn('Stripe webhook: no order matched invoice.payment_succeeded', {
+          invoiceId: invoice.id,
+          metadataOrderId: invoice.metadata?.orderId,
+        });
+      } else if (updated.orderType === 'subscription') {
+        await syncSubscriptionFromOrder(updated, {
+          status: 'active',
+          currentPeriodEnd: periodEnd,
+          stripeSubscriptionId: invoiceSubscriptionId,
+          accumulatedValueDelta: amountPaidMajor,
+        });
+      }
+      break;
+    }
+
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object as Stripe.Invoice;
+      const invoiceSubscriptionId = getInvoiceSubscriptionId(invoice);
+      const periodEnd = getInvoicePeriodEndDate(invoice);
+      const update: Partial<IOrder> = {
+        latestStripeEvent: event.type,
+        status: 'pending',
+        paymentStatus: 'failed',
+        invoiceStatus: invoice.status ?? 'open',
+        stripeInvoiceId: invoice.id,
+        stripeSubscriptionId: invoiceSubscriptionId,
+        stripeCustomerId: asStripeId(invoice.customer),
+      };
+
+      const updated = await updateOrderByLookup(
+        {
+          orderId: invoice.metadata?.orderId,
+          stripeSubscriptionId: invoiceSubscriptionId,
+          stripeInvoiceId: invoice.id,
+        },
+        update,
+        context
+      );
+
+      if (!updated) {
+        console.warn('Stripe webhook: no order matched invoice.payment_failed', {
+          invoiceId: invoice.id,
+          metadataOrderId: invoice.metadata?.orderId,
+        });
+      } else if (updated.orderType === 'subscription') {
+        await syncSubscriptionFromOrder(updated, {
+          status: 'past_due',
+          currentPeriodEnd: periodEnd,
+          stripeSubscriptionId: invoiceSubscriptionId,
+        });
+      }
+      break;
+    }
+
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object as Stripe.Subscription;
+      const { status, paymentStatus } = mapSubscriptionStatus(subscription.status);
+      const update: Partial<IOrder> = {
+        latestStripeEvent: event.type,
+        status,
+        paymentStatus,
+        stripeSubscriptionId: subscription.id,
+        stripeCustomerId: asStripeId(subscription.customer),
+      };
+
+      const updated = await updateOrderByLookup(
+        {
+          orderId: subscription.metadata?.orderId,
+          stripeSubscriptionId: subscription.id,
+        },
+        update,
+        context
+      );
+
+      if (!updated) {
+        console.warn('Stripe webhook: no order matched subscription event', {
+          subscriptionId: subscription.id,
+          metadataOrderId: subscription.metadata?.orderId,
+        });
+      }
+      await applyStripeSubscriptionEvent(subscription);
+      break;
+    }
+
+    default:
+      if (harmlessStripeEvents.has(event.type)) {
+        console.debug(`Stripe event ignored: ${event.type}`);
+      } else {
+        console.log(`Unhandled Stripe event type: ${event.type}`);
+      }
+  }
+};
+
+export const webhookHandler = async (req: Request, res: Response): Promise<void> => {
+  const signature = req.headers['stripe-signature'];
+  if (!signature) {
+    res.status(400).send('Missing stripe-signature header');
+    return;
+  }
+
+  let event: Stripe.Event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, signature, webhookSecret);
-    console.log("🔍 Parsed Stripe Event:", event);
+    const secret = ensureWebhookSecret();
+    const rawBody = req.body;
+    if (!Buffer.isBuffer(rawBody)) {
+      throw new Error('Expected raw request body to be a Buffer');
+    }
+
+    event = stripe.webhooks.constructEvent(rawBody, signature, secret);
   } catch (err: any) {
-    console.error("❌ Webhook Signature Error:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    console.error('Webhook signature verification failed', err?.message || err);
+    res.status(400).send(`Webhook Error: ${err?.message || 'signature verification failed'}`);
+    return;
   }
 
   try {
-    console.log("📦 Event type:", event.type);
-    console.log("📨 Event data:", event.data.object);
-
-    switch (event.type) {
-      case "checkout.session.completed":
-        console.log("🎉 Checkout Session Completed Event");
-        break;
-
-      case "invoice.payment_succeeded":
-        console.log("💰 Invoice Payment Succeeded Event");
-        break;
-
-      case "customer.subscription.deleted":
-        console.log("⚠️ Subscription Cancelled");
-        break;
-
-      default:
-        console.log("ℹ️ Unhandled event type:", event.type);
-    }
-
+    await processStripeEvent(event);
     res.json({ received: true });
   } catch (err: any) {
-    console.error("❌ Webhook handling error:", err);
-    res.status(500).send();
+    console.error('Error handling Stripe webhook', err);
+    res.status(500).send('Webhook handling error');
   }
 };
 
 export default router;
+
