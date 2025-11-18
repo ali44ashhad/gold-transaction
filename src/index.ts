@@ -77,6 +77,90 @@ app.get('/api/health/db', async (_req, res) => {
   }
 });
 
+
+app.get('/success', (req, res) => {
+  const sessionId = req.query.session_id;
+
+  res.send(`
+    <html>
+      <head>
+        <title>Payment Successful</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 100px;
+            color: #333;
+          }
+          .card {
+            max-width: 400px;
+            margin: auto;
+            padding: 30px;
+            border: 1px solid #ccc;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+          }
+          .success {
+            color: green;
+            font-size: 24px;
+            margin-bottom: 20px;
+          }
+          .session {
+            font-size: 14px;
+            margin-top: 10px;
+            color: #555;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="success">🎉 Payment Successful 🎉</div>
+          <p>Thank you! Your payment has been received.</p>
+          <p class="session">Session ID:<br> <strong>${sessionId}</strong></p>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+
+app.get('/cancel', (_req, res) => {
+  res.send(`
+    <html>
+      <head>
+        <title>Payment Cancelled</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin-top: 100px;
+            color: #333;
+          }
+          .card {
+            max-width: 400px;
+            margin: auto;
+            padding: 30px;
+            border: 1px solid #ccc;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+          }
+          .cancel {
+            color: red;
+            font-size: 24px;
+            margin-bottom: 20px;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="cancel">❌ Payment Cancelled ❌</div>
+          <p>Your payment was not completed.</p>
+        </div>
+      </body>
+    </html>
+  `);
+});
+
 // 404 handler
 app.use((_req, res) => {
   res.status(404).json({ error: 'Route not found' });
