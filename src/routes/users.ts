@@ -9,7 +9,9 @@ import {
   updateProfile,
   getAllUsers,
   updateUserRole,
+  createAdminUser,
 } from '../controllers/userController';
+// import { validateSignup } from '../validators/authValidators';
 
 const router = express.Router();
 
@@ -17,6 +19,11 @@ const router = express.Router();
 // @desc    Update current user profile
 // @access  Private
 router.put('/me', authenticate, validate(validateUpdateProfile), updateProfile);
+
+// @route   POST /api/users/admin
+// @desc    Create an admin user using a shared secret (bootstrap)
+// @access  Protected via ADMIN_CREATION_SECRET
+router.post('/admin', createAdminUser);
 
 // @route   GET /api/users
 // @desc    Get all users (admin only)

@@ -9,6 +9,9 @@ import authRoutes from './routes/auth';
 import checkoutRouter, { webhookHandler } from './routes/checkout';
 import bodyParser from 'body-parser';
 import userRoutes from './routes/users';
+import subscriptionRoutes from './routes/subscriptions';
+import metalPriceRoutes from './routes/metalPrices';
+import { startMetalPriceCron } from './jobs/metalPriceScheduler';
 
 dotenv.config();
 
@@ -16,10 +19,14 @@ const app = express();
 const PORT = process.env.PORT || 5005;
 
 // Connect to MongoDB
-connectDB().catch((error) => {
-  console.error('Failed to connect to database:', error);
-  process.exit(1);
-});
+connectDB()
+  .then(() => {
+    startMetalPriceCron();
+  })
+  .catch((error) => {
+    console.error('Failed to connect to database:', error);
+    process.exit(1);
+  });
 
 // CORS
 app.use(cors({
@@ -44,6 +51,8 @@ app.use(cookieParser());
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/checkout', checkoutRouter);
+app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/metal-prices', metalPriceRoutes);
 
 // Health check route
 app.get('/api/health', (_req, res) => {
