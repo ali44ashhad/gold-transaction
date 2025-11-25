@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { Subscription } from '../models/Subscription';
+import { CancellationRequest } from '../models/CancellationRequest';
 
 const isAdmin = (req: Request) => req.user?.role === 'admin';
 
@@ -67,8 +68,32 @@ export const getSubscriptions = async (req: Request, res: Response): Promise<voi
     }
 
     const subscriptions = await Subscription.find(query).sort({ createdAt: -1 });
+    const subscriptionIds = subscriptions.map((subscription) => subscription._id);
 
-    res.json({ subscriptions });
+    const cancellationRequests = await CancellationRequest.find({
+      subscriptionId: { $in: subscriptionIds },
+      status: { $nin: ['completed', 'rejected'] },
+    }).select('_id subscriptionId status');
+
+    const cancellationMap = new Map(
+      cancellationRequests.map((request) => [
+        request.subscriptionId?.toString(),
+        { id: request._id.toString(), status: request.status },
+      ])
+    );
+
+    const subscriptionsWithCancellationInfo = subscriptions.map((subscription) => {
+      const subscriptionObj = subscription.toObject();
+      const cancellationInfo = cancellationMap.get(subscription._id.toString());
+
+      return {
+        ...subscriptionObj,
+        cancellationRequestId: cancellationInfo?.id ?? null,
+        cancellationRequestStatus: cancellationInfo?.status ?? null,
+      };
+    });
+
+    res.json({ subscriptions: subscriptionsWithCancellationInfo });
   } catch (error: any) {
     console.error('Get subscriptions error:', error);
     res.status(500).json({ error: 'Failed to fetch subscriptions' });
@@ -88,7 +113,18 @@ export const getSubscriptionById = async (req: Request, res: Response): Promise<
       return;
     }
 
-    res.json({ subscription });
+    const cancellationRequest = await CancellationRequest.findOne({
+      subscriptionId: subscription._id,
+      status: { $nin: ['completed', 'rejected'] },
+    }).select('_id status');
+
+    const subscriptionWithCancellationInfo = {
+      ...subscription.toObject(),
+      cancellationRequestId: cancellationRequest?._id.toString() ?? null,
+      cancellationRequestStatus: cancellationRequest?.status ?? null,
+    };
+
+    res.json({ subscription: subscriptionWithCancellationInfo });
   } catch (error: any) {
     console.error('Get subscription error:', error);
     res.status(500).json({ error: 'Failed to fetch subscription' });

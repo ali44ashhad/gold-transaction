@@ -10,6 +10,8 @@ import checkoutRouter, { webhookHandler } from './routes/checkout';
 import bodyParser from 'body-parser';
 import userRoutes from './routes/users';
 import subscriptionRoutes from './routes/subscriptions';
+import cancellationRequestRoutes from './routes/cancellationRequests';
+import withdrawalRequestRoutes from './routes/withdrawalRequests';
 import metalPriceRoutes from './routes/metalPrices';
 import orderRoutes from './routes/orders';
 import { startMetalPriceCron } from './jobs/metalPriceScheduler';
@@ -67,6 +69,8 @@ app.use('/api/checkout', checkoutRouter);
 app.use('/api/orders', orderRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/metal-prices', metalPriceRoutes);
+app.use('/api/cancellation-requests', cancellationRequestRoutes);
+app.use('/api/withdrawal-requests', withdrawalRequestRoutes);
 
 // Health check route
 app.get('/api/health', (_req, res) => {
