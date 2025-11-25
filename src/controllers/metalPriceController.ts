@@ -8,8 +8,16 @@ const GOLD_API_BASE_URL = 'https://www.goldapi.io/api';
 
 interface GoldApiResponse {
   price?: number;
+  price_gram_24k?: number;
   error?: string;
 }
+
+const getStartOfYesterdayUtc = (): Date => {
+  const boundary = new Date();
+  boundary.setUTCHours(0, 0, 0, 0);
+  boundary.setUTCDate(boundary.getUTCDate() - 1);
+  return boundary;
+};
 
 const getPreviousDayString = (): string => {
   const yesterday = new Date();
@@ -22,7 +30,14 @@ const buildMetalUrl = (metalSymbol: 'gold' | 'silver', date: string): string => 
   return `${GOLD_API_BASE_URL}/${metalCode}/USD/${date}`;
 };
 
-const extractUsdPrice = (payload: GoldApiResponse): number | null => {
+const extractMetalPrice = (
+  payload: GoldApiResponse,
+  metalSymbol: 'gold' | 'silver',
+): number | null => {
+  if (metalSymbol === 'gold') {
+    return typeof payload.price_gram_24k === 'number' ? payload.price_gram_24k : null;
+  }
+
   return typeof payload.price === 'number' ? payload.price : null;
 };
 
@@ -57,7 +72,7 @@ const fetchMetalPrice = async (
   }
 
   const payload = (await response.json()) as GoldApiResponse;
-  const price = extractUsdPrice(payload);
+  const price = extractMetalPrice(payload, metalSymbol);
 
   if (price === null) {
     throw new Error(`Invalid ${metalSymbol} data returned from Gold API`);
@@ -125,6 +140,26 @@ export const runMetalPriceSync = async (): Promise<MetalPriceSyncResult> => {
   ]);
 
   return { goldPrice, silverPrice, timestamp };
+};
+
+export const ensureFreshMetalPrices = async (): Promise<boolean> => {
+  const existingPrices = await MetalPrice.find();
+  const yesterdayBoundary = getStartOfYesterdayUtc();
+
+  const missingPrices = existingPrices.length < 2;
+  const stalePrices = existingPrices.some((record) => {
+    if (!record?.lastUpdated) {
+      return true;
+    }
+    return record.lastUpdated < yesterdayBoundary;
+  });
+
+  if (missingPrices || stalePrices) {
+    await runMetalPriceSync();
+    return true;
+  }
+
+  return false;
 };
 
 export const syncMetalPrices = async (_req: Request, res: Response): Promise<void> => {

@@ -13,6 +13,7 @@ import subscriptionRoutes from './routes/subscriptions';
 import metalPriceRoutes from './routes/metalPrices';
 import orderRoutes from './routes/orders';
 import { startMetalPriceCron } from './jobs/metalPriceScheduler';
+import { ensureFreshMetalPrices } from './controllers/metalPriceController';
 
 dotenv.config();
 
@@ -21,7 +22,18 @@ const PORT = process.env.PORT || 5005;
 
 // Connect to MongoDB
 connectDB()
-  .then(() => {
+  .then(async () => {
+    try {
+      const refreshed = await ensureFreshMetalPrices();
+      if (refreshed) {
+        console.log('[MetalPriceStartup] Prices were stale; refreshed via Gold API.');
+      } else {
+        console.log('[MetalPriceStartup] Existing metal prices are current.');
+      }
+    } catch (error) {
+      console.error('[MetalPriceStartup] Failed to verify metal prices on startup:', error);
+    }
+
     startMetalPriceCron();
   })
   .catch((error) => {
