@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Stripe from 'stripe';
 
 import { Subscription, ISubscription, MetalType, UnitType, SubscriptionStatus } from '../models/Subscription';
+import { MetalPrice } from '../models/MetalPrice';
 import { IOrder } from '../models/Order';
 import { Order } from '../models/Order';
 
@@ -10,6 +11,7 @@ type SubscriptionSyncOptions = {
   currentPeriodEnd?: Date;
   stripeSubscriptionId?: string;
   accumulatedValueDelta?: number;
+  accumulatedWeightDelta?: number;
 };
 
 const coerceMetal = (value?: unknown): MetalType => {
@@ -65,6 +67,62 @@ const buildConfigFromOrder = (order: IOrder) => {
   };
 };
 
+const OZ_IN_GRAMS = 31.1034768;
+
+const getBaseUnitForMetal = (metal: MetalType): UnitType => (metal === 'silver' ? 'oz' : 'g');
+
+const convertPriceToTargetUnit = (price: number, baseUnit: UnitType, targetUnit: UnitType): number => {
+  if (targetUnit === baseUnit) {
+    return price;
+  }
+
+  if (baseUnit === 'g' && targetUnit === 'oz') {
+    return price * OZ_IN_GRAMS;
+  }
+
+  if (baseUnit === 'oz' && targetUnit === 'g') {
+    return price / OZ_IN_GRAMS;
+  }
+
+  return price;
+};
+
+const getMetalPricePerUnit = async (metal: MetalType, targetUnit: UnitType): Promise<number | null> => {
+  const record = await MetalPrice.findOne({ metalSymbol: metal }).lean();
+  if (!record?.price || record.price <= 0) {
+    console.warn(`[SubscriptionSync] Could not determine price for metal=${metal}`);
+    return null;
+  }
+
+  const baseUnit = getBaseUnitForMetal(metal);
+  return convertPriceToTargetUnit(record.price, baseUnit, targetUnit);
+};
+
+const computeWeightDelta = async (
+  metal: MetalType,
+  targetUnit: UnitType,
+  amountDelta?: number,
+  explicitWeightDelta?: number
+): Promise<number | null> => {
+  if (typeof explicitWeightDelta === 'number' && explicitWeightDelta >= 0) {
+    return explicitWeightDelta;
+  }
+
+  if (!amountDelta || amountDelta <= 0) {
+    return null;
+  }
+
+  const pricePerUnit = await getMetalPricePerUnit(metal, targetUnit);
+  if (!pricePerUnit || pricePerUnit <= 0) {
+    console.warn(
+      `[SubscriptionSync] Skipping weight accumulation because pricePerUnit is unavailable for metal=${metal}`
+    );
+    return null;
+  }
+
+  return amountDelta / pricePerUnit;
+};
+
 export const syncSubscriptionFromOrder = async (
   order: IOrder,
   options: SubscriptionSyncOptions = {}
@@ -92,7 +150,6 @@ export const syncSubscriptionFromOrder = async (
     },
     $setOnInsert: {
       userId: order.user,
-      accumulatedWeight: 0,
     },
   };
 
@@ -104,8 +161,22 @@ export const syncSubscriptionFromOrder = async (
     update.$set.currentPeriodEnd = options.currentPeriodEnd;
   }
 
-  if (options.accumulatedValueDelta) {
-    update.$inc = { accumulatedValue: options.accumulatedValueDelta };
+  const weightDelta = await computeWeightDelta(
+    config.metal,
+    config.targetUnit,
+    options.accumulatedValueDelta,
+    options.accumulatedWeightDelta
+  );
+
+  const hasValueDelta = typeof options.accumulatedValueDelta === 'number' && options.accumulatedValueDelta !== 0;
+  const hasWeightDelta = typeof weightDelta === 'number' && weightDelta !== 0;
+
+  if (hasValueDelta || hasWeightDelta) {
+    update.$inc = {
+      ...(update.$inc || {}),
+      ...(hasValueDelta ? { accumulatedValue: options.accumulatedValueDelta } : {}),
+      ...(hasWeightDelta ? { accumulatedWeight: weightDelta } : {}),
+    };
   }
 
   return Subscription.findOneAndUpdate(filter, update, {
