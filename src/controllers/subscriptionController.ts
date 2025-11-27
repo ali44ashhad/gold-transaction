@@ -1,7 +1,11 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { Subscription } from '../models/Subscription';
-import { CancellationRequest } from '../models/CancellationRequest';
+import {
+  CancellationRequest,
+  CancellationRequestStatus,
+  ICancellationRequest,
+} from '../models/CancellationRequest';
 
 const isAdmin = (req: Request) => req.user?.role === 'admin';
 
@@ -70,21 +74,33 @@ export const getSubscriptions = async (req: Request, res: Response): Promise<voi
     const subscriptions = await Subscription.find(query).sort({ createdAt: -1 });
     const subscriptionIds = subscriptions.map((subscription) => subscription._id);
 
-    const cancellationRequests = await CancellationRequest.find({
+    type CancellationRequestSummary = Pick<ICancellationRequest, 'subscriptionId' | 'status'> & {
+      _id: mongoose.Types.ObjectId;
+    };
+
+    const cancellationRequests = (await CancellationRequest.find({
       subscriptionId: { $in: subscriptionIds },
       status: { $nin: ['completed', 'rejected'] },
-    }).select('_id subscriptionId status');
+    })
+      .select('_id subscriptionId status')
+      .lean()) as unknown as CancellationRequestSummary[];
 
-    const cancellationMap = new Map(
-      cancellationRequests.map((request) => [
-        request.subscriptionId?.toString(),
-        { id: request._id.toString(), status: request.status },
-      ])
+    const cancellationMap = new Map<
+      string,
+      { id: string; status: CancellationRequestStatus }
+    >(
+      cancellationRequests
+        .filter((request) => request.subscriptionId)
+        .map((request) => [
+          request.subscriptionId!.toString(),
+          { id: request._id.toString(), status: request.status },
+        ])
     );
 
     const subscriptionsWithCancellationInfo = subscriptions.map((subscription) => {
       const subscriptionObj = subscription.toObject();
-      const cancellationInfo = cancellationMap.get(subscription._id.toString());
+      const subscriptionId = (subscription._id as mongoose.Types.ObjectId).toString();
+      const cancellationInfo = cancellationMap.get(subscriptionId);
 
       return {
         ...subscriptionObj,
@@ -116,7 +132,9 @@ export const getSubscriptionById = async (req: Request, res: Response): Promise<
     const cancellationRequest = await CancellationRequest.findOne({
       subscriptionId: subscription._id,
       status: { $nin: ['completed', 'rejected'] },
-    }).select('_id status');
+    })
+      .select('_id status')
+      .lean<Pick<ICancellationRequest, 'status'> & { _id: mongoose.Types.ObjectId }>();
 
     const subscriptionWithCancellationInfo = {
       ...subscription.toObject(),
