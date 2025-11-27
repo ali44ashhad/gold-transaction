@@ -9,6 +9,8 @@ import {
   updateProfile,
   getAllUsers,
   updateUserRole,
+  updateUser,
+  deleteUser,
   createAdminUser,
 } from '../controllers/userController';
 // import { validateSignup } from '../validators/authValidators';
@@ -34,6 +36,16 @@ router.get('/', authenticate, authorize('admin'), getAllUsers);
 // @desc    Update user role (admin only)
 // @access  Private (Admin)
 router.patch('/:id/role', authenticate, authorize('admin'), validate(validateUpdateRole), updateUserRole);
+
+// @route   PUT /api/users/:id
+// @desc    Update user (admin only)
+// @access  Private (Admin)
+router.put('/:id', authenticate, authorize('admin'), validate(validateUpdateProfile), updateUser);
+
+// @route   DELETE /api/users/:id
+// @desc    Delete user (admin only)
+// @access  Private (Admin)
+router.delete('/:id', authenticate, authorize('admin'), deleteUser);
 
 export default router;
 

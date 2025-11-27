@@ -110,6 +110,86 @@ export const updateUserRole = async (req: Request, res: Response): Promise<void>
   }
 };
 
+export const updateUser = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const update: Record<string, unknown> = {};
+    const {
+      firstName,
+      lastName,
+      phone,
+      billingAddress,
+      shippingAddress,
+      email,
+    } = req.body;
+
+    if (firstName !== undefined) update.firstName = firstName;
+    if (lastName !== undefined) update.lastName = lastName;
+    if (phone !== undefined) update.phone = phone;
+    if (billingAddress) update.billingAddress = billingAddress;
+    if (shippingAddress) update.shippingAddress = shippingAddress;
+    if (email !== undefined) update.email = email;
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      update,
+      { new: true }
+    ).select('-password');
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    res.json({
+      user: {
+        id: String(user._id),
+        _id: String(user._id),
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone,
+        billingAddress: user.billingAddress,
+        shippingAddress: user.shippingAddress,
+        role: user.role,
+        emailVerified: user.emailVerified,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+      },
+    });
+  } catch (error: any) {
+    console.error('Update user error:', error);
+    if (error.code === 11000) {
+      res.status(400).json({ error: 'Email already exists' });
+      return;
+    }
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+};
+
+export const deleteUser = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    // Prevent deleting admin users
+    if (user.role === 'admin') {
+      res.status(403).json({ error: 'Cannot delete admin users' });
+      return;
+    }
+
+    await User.findByIdAndDelete(req.params.id);
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (error: any) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+};
+
 export const createAdminUser = async (req: Request, res: Response): Promise<void> => {
   try {
     const secretFromHeader = req.headers['x-admin-secret'];
