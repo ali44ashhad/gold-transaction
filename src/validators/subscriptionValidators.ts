@@ -34,8 +34,9 @@ export const createSubscriptionValidator = [
     .isIn(['oz', 'g'])
     .withMessage('Target unit must be oz or g'),
   body('monthlyInvestment')
-    .isInt({ min: 1 })
-    .withMessage('Monthly investment must be at least 1'),
+    .isFloat({ min: 10, max: 1000 })
+    .withMessage('Monthly investment must be between 10 and 1000')
+    .toFloat(),
   body('quantity').optional().isInt({ min: 1 }),
   body('accumulatedValue').optional().isFloat({ min: 0 }),
   body('accumulatedWeight').optional().isFloat({ min: 0 }),
@@ -53,7 +54,11 @@ export const updateSubscriptionValidator = [
   body('planName').optional().isString().trim(),
   body('targetWeight').optional().isFloat({ gt: 0 }),
   body('targetUnit').optional().isIn(['oz', 'g']),
-  body('monthlyInvestment').optional().isInt({ min: 1 }),
+  body('monthlyInvestment')
+    .optional()
+    .isFloat({ min: 10, max: 1000 })
+    .withMessage('Monthly investment must be between 10 and 1000')
+    .toFloat(),
   body('quantity').optional().isInt({ min: 1 }),
   body('accumulatedValue').optional().isFloat({ min: 0 }),
   body('accumulatedWeight').optional().isFloat({ min: 0 }),

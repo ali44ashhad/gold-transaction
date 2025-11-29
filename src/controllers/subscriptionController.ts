@@ -1,17 +1,148 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
-import { Subscription } from '../models/Subscription';
+import Stripe from 'stripe';
+import { Subscription, ISubscription, SubscriptionStatus } from '../models/Subscription';
 import {
   CancellationRequest,
   CancellationRequestStatus,
   ICancellationRequest,
 } from '../models/CancellationRequest';
+import { stripe } from '../stripe';
 
 const isAdmin = (req: Request) => req.user?.role === 'admin';
 
 const canAccessSubscription = (req: Request, subscriptionUserId: mongoose.Types.ObjectId) => {
   if (isAdmin(req)) return true;
   return subscriptionUserId.toString() === req.user?.userId;
+};
+
+const subscriptionRetrieveParams: Stripe.SubscriptionRetrieveParams = {
+  expand: ['items.data.price.product'],
+};
+
+const toStripeUnitAmount = (amount: number) => {
+  return Math.round(Number(amount) * 100);
+};
+
+const epochToDate = (epoch?: number | null): Date | undefined => {
+  if (!epoch) return undefined;
+  return new Date(epoch * 1000);
+};
+
+const mapStripeStatus = (status: Stripe.Subscription.Status): SubscriptionStatus => {
+  switch (status) {
+    case 'active':
+      return 'active';
+    case 'trialing':
+      return 'trialing';
+    case 'incomplete':
+      return 'incomplete';
+    case 'incomplete_expired':
+      return 'incomplete_expired';
+    case 'past_due':
+      return 'past_due';
+    case 'canceled':
+      return 'canceled';
+    case 'unpaid':
+      return 'unpaid';
+    default:
+      return 'pending_payment';
+  }
+};
+
+const ensureStripeProductId = (price: Stripe.Price | null | undefined) => {
+  const productCandidate = price?.product;
+  if (!productCandidate) {
+    throw new Error('Stripe subscription price is missing product information');
+  }
+
+  if (typeof productCandidate === 'string') {
+    return productCandidate;
+  }
+
+  if (productCandidate.id) {
+    return productCandidate.id;
+  }
+
+  throw new Error('Unable to resolve product id for Stripe subscription price');
+};
+
+const buildRecurringConfig = (price: Stripe.Price | null | undefined) => {
+  const interval = price?.recurring?.interval ?? 'month';
+  const intervalCount = price?.recurring?.interval_count ?? 1;
+  return {
+    interval,
+    interval_count: intervalCount,
+  } satisfies Stripe.PriceCreateParams.Recurring;
+};
+
+const syncStripeMonthlyInvestment = async (
+  subscription: ISubscription,
+  nextMonthlyInvestment: number
+): Promise<Stripe.Subscription> => {
+  if (!subscription.stripeSubscriptionId) {
+    throw new Error('Subscription is not linked to a Stripe subscription');
+  }
+  // console.log("TESTING STRIPE:", subscription.stripeSubscriptionId);
+  
+  const stripeSubscription = await stripe.subscriptions.retrieve(
+    subscription.stripeSubscriptionId,
+    subscriptionRetrieveParams
+  );
+  // console.log("TESTING STRIPE SUBSCRIPTION FOUND:", stripeSubscription);
+  
+
+  const stripeItem = stripeSubscription.items?.data?.[0];
+  if (!stripeItem?.id) {
+    throw new Error('Stripe subscription is missing line items');
+  }
+
+  const stripePrice = stripeItem.price;
+  if (!stripePrice) {
+    throw new Error('Stripe subscription item is missing price information');
+  }
+  console.log("TESTING STRIPE PRICE:", stripePrice);
+  
+
+  const desiredUnitAmount = toStripeUnitAmount(nextMonthlyInvestment);
+  const currentUnitAmount = stripePrice.unit_amount ?? 0;
+  // console.log("TESTING CURRENT UNIT AMOUNT:", currentUnitAmount);
+  console.log("TESTING DESIRED UNIT AMOUNT:", desiredUnitAmount);
+  console.log("TESTING CURRENT UNIT AMOUNT:", currentUnitAmount);
+
+
+  if (currentUnitAmount === desiredUnitAmount) {
+    return stripeSubscription;
+  }
+
+  const currency = stripePrice.currency ?? 'usd';
+  const product = ensureStripeProductId(stripePrice);
+  console.log("TESTING PRODUCT:", product);
+  
+  const recurring = buildRecurringConfig(stripePrice);
+
+  const newPrice = await stripe.prices.create({
+    unit_amount: desiredUnitAmount,
+    currency,
+    product,
+    recurring,
+    nickname: `${subscription.planName} - $${nextMonthlyInvestment.toFixed(2)}`,
+  });
+
+  const updatedSubscription = await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
+    items: [
+      {
+        id: stripeItem.id,
+        price: newPrice.id,
+        quantity: stripeItem.quantity ?? 1,
+      },
+    ],
+    billing_cycle_anchor: 'unchanged',
+    proration_behavior: 'none',
+    payment_behavior: 'pending_if_incomplete',
+  });
+
+  return updatedSubscription;
 };
 
 export const createSubscription = async (req: Request, res: Response): Promise<void> => {
@@ -166,7 +297,6 @@ export const updateSubscription = async (req: Request, res: Response): Promise<v
       'planName',
       'targetWeight',
       'targetUnit',
-      'monthlyInvestment',
       'quantity',
       'accumulatedValue',
       'accumulatedWeight',
@@ -181,6 +311,51 @@ export const updateSubscription = async (req: Request, res: Response): Promise<v
         (subscription as any)[field] = req.body[field];
       }
     });
+
+    if (req.body.monthlyInvestment !== undefined) {
+      const nextMonthlyInvestment = Number(req.body.monthlyInvestment);
+      if (
+        !Number.isFinite(nextMonthlyInvestment) ||
+        nextMonthlyInvestment < 10 ||
+        nextMonthlyInvestment > 1000
+      ) {
+        res.status(400).json({ error: 'monthlyInvestment must be between 10 and 1000 USD' });
+        return;
+      }
+
+      if (!subscription.stripeSubscriptionId) {
+        res.status(400).json({ error: 'Subscription is not linked to Stripe and cannot be modified' });
+        return;
+      }
+
+      const updatedStripeSubscription = await syncStripeMonthlyInvestment(
+        subscription,
+        nextMonthlyInvestment
+      );
+    console.log("TESTING UPDATED STRIPE SUBSCRIPTION:", updatedStripeSubscription);
+      
+      subscription.monthlyInvestment = nextMonthlyInvestment;
+      console.info('Subscription monthly investment updated', {
+        subscriptionId: subscription.id,
+        stripeSubscriptionId: subscription.stripeSubscriptionId,
+        nextMonthlyInvestment,
+      });
+
+      const nextPeriodEndSeconds = (updatedStripeSubscription as Stripe.Subscription & {
+        current_period_end?: number | null;
+      }).current_period_end;
+      const nextPeriodEnd = epochToDate(nextPeriodEndSeconds);
+      if (nextPeriodEnd) {
+        subscription.currentPeriodEnd = nextPeriodEnd;
+      }
+
+      subscription.status = mapStripeStatus(updatedStripeSubscription.status);
+
+      const stripeQuantity = updatedStripeSubscription.items?.data?.[0]?.quantity;
+      if (typeof stripeQuantity === 'number') {
+        subscription.quantity = stripeQuantity;
+      }
+    }
 
     await subscription.save();
 

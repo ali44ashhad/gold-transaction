@@ -55,6 +55,14 @@ const ensureBaseUrl = () => {
   return url.replace(/\/$/, '');
 };
 
+const ensureSubscriptionProductId = () => {
+  const productId = process.env.STRIPE_SUBSCRIPTION_PRODUCT_ID;
+  if (!productId) {
+    throw new Error('Missing STRIPE_SUBSCRIPTION_PRODUCT_ID in environment');
+  }
+  return productId;
+};
+
 const toPositiveNumber = (value: unknown, fallback: number): number => {
   const num = Number(value);
   if (!Number.isFinite(num)) {
@@ -184,22 +192,36 @@ router.post('/create-session', authenticate, validateCreateSessionPayload, async
     const baseUrl = ensureBaseUrl();
     const encodedOrderId = encodeURIComponent(orderId);
 
-    const lineItem: Stripe.Checkout.SessionCreateParams.LineItem = {
-      price_data: {
-        currency: normalizedCurrency,
-        product_data: {
-          name: productName,
-          description,
-        },
-        unit_amount: unitAmount,
-      },
-      quantity: Number(quantity) > 0 ? Number(quantity) : 1,
-    };
+    let lineItem: Stripe.Checkout.SessionCreateParams.LineItem;
 
     if (checkoutMode === 'subscription') {
-      lineItem.price_data!.recurring = {
-        interval: interval === 'year' ? 'year' : 'month',
-        interval_count: Number(intervalCount) > 0 ? Number(intervalCount) : 1,
+      const productId = ensureSubscriptionProductId();
+      const dynamicPrice = await stripe.prices.create({
+        unit_amount: unitAmount,
+        currency: normalizedCurrency,
+        product: productId,
+        recurring: {
+          interval: interval === 'year' ? 'year' : 'month',
+          interval_count: Number(intervalCount) > 0 ? Number(intervalCount) : 1,
+        },
+        nickname: `${productName} - $${normalizedAmount.toFixed(2)}`,
+      });
+
+      lineItem = {
+        price: dynamicPrice.id,
+        quantity: Number(quantity) > 0 ? Number(quantity) : 1,
+      };
+    } else {
+      lineItem = {
+        price_data: {
+          currency: normalizedCurrency,
+          product_data: {
+            name: productName,
+            description,
+          },
+          unit_amount: unitAmount,
+        },
+        quantity: Number(quantity) > 0 ? Number(quantity) : 1,
       };
     }
 
