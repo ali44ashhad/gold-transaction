@@ -7,6 +7,11 @@ import {
   CancellationRequestStatus,
   ICancellationRequest,
 } from '../models/CancellationRequest';
+import {
+  WithdrawalRequest,
+  WithdrawalRequestStatus,
+  IWithdrawalRequest,
+} from '../models/WithdrawalRequest';
 import { stripe } from '../stripe';
 
 const isAdmin = (req: Request) => req.user?.role === 'admin';
@@ -209,12 +214,23 @@ export const getSubscriptions = async (req: Request, res: Response): Promise<voi
       _id: mongoose.Types.ObjectId;
     };
 
+    type WithdrawalRequestSummary = Pick<IWithdrawalRequest, 'subscriptionId' | 'status'> & {
+      _id: mongoose.Types.ObjectId;
+    };
+
     const cancellationRequests = (await CancellationRequest.find({
       subscriptionId: { $in: subscriptionIds },
       status: { $nin: ['completed', 'rejected'] },
     })
       .select('_id subscriptionId status')
       .lean()) as unknown as CancellationRequestSummary[];
+
+    const withdrawalRequests = (await WithdrawalRequest.find({
+      subscriptionId: { $in: subscriptionIds },
+      status: { $nin: ['completed', 'rejected'] },
+    })
+      .select('_id subscriptionId status')
+      .lean()) as unknown as WithdrawalRequestSummary[];
 
     const cancellationMap = new Map<
       string,
@@ -228,19 +244,34 @@ export const getSubscriptions = async (req: Request, res: Response): Promise<voi
         ])
     );
 
-    const subscriptionsWithCancellationInfo = subscriptions.map((subscription) => {
+    const withdrawalMap = new Map<
+      string,
+      { id: string; status: WithdrawalRequestStatus }
+    >(
+      withdrawalRequests
+        .filter((request) => request.subscriptionId)
+        .map((request) => [
+          request.subscriptionId!.toString(),
+          { id: request._id.toString(), status: request.status },
+        ])
+    );
+
+    const subscriptionsWithRequestInfo = subscriptions.map((subscription) => {
       const subscriptionObj = subscription.toObject();
       const subscriptionId = (subscription._id as mongoose.Types.ObjectId).toString();
       const cancellationInfo = cancellationMap.get(subscriptionId);
+      const withdrawalInfo = withdrawalMap.get(subscriptionId);
 
       return {
         ...subscriptionObj,
         cancellationRequestId: cancellationInfo?.id ?? null,
         cancellationRequestStatus: cancellationInfo?.status ?? null,
+        withdrawalRequestId: withdrawalInfo?.id ?? null,
+        withdrawalRequestStatus: withdrawalInfo?.status ?? null,
       };
     });
 
-    res.json({ subscriptions: subscriptionsWithCancellationInfo });
+    res.json({ subscriptions: subscriptionsWithRequestInfo });
   } catch (error: any) {
     console.error('Get subscriptions error:', error);
     res.status(500).json({ error: 'Failed to fetch subscriptions' });
@@ -267,13 +298,22 @@ export const getSubscriptionById = async (req: Request, res: Response): Promise<
       .select('_id status')
       .lean<Pick<ICancellationRequest, 'status'> & { _id: mongoose.Types.ObjectId }>();
 
-    const subscriptionWithCancellationInfo = {
+    const withdrawalRequest = await WithdrawalRequest.findOne({
+      subscriptionId: subscription._id,
+      status: { $nin: ['completed', 'rejected'] },
+    })
+      .select('_id status')
+      .lean<Pick<IWithdrawalRequest, 'status'> & { _id: mongoose.Types.ObjectId }>();
+
+    const subscriptionWithRequestInfo = {
       ...subscription.toObject(),
       cancellationRequestId: cancellationRequest?._id.toString() ?? null,
       cancellationRequestStatus: cancellationRequest?.status ?? null,
+      withdrawalRequestId: withdrawalRequest?._id.toString() ?? null,
+      withdrawalRequestStatus: withdrawalRequest?.status ?? null,
     };
 
-    res.json({ subscription: subscriptionWithCancellationInfo });
+    res.json({ subscription: subscriptionWithRequestInfo });
   } catch (error: any) {
     console.error('Get subscription error:', error);
     res.status(500).json({ error: 'Failed to fetch subscription' });
