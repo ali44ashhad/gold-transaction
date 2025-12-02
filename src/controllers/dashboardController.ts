@@ -1,0 +1,171 @@
+import { Request, Response } from 'express';
+import mongoose from 'mongoose';
+import { Subscription } from '../models/Subscription';
+import { Order } from '../models/Order';
+import { User } from '../models/User';
+
+const GRAMS_PER_OUNCE = 31.1035;
+
+// Helper function to convert weight to a standard unit
+const convertToStandardUnit = (weight: number, fromUnit: string, toUnit: string): number => {
+  if (fromUnit === toUnit) return weight;
+  if (fromUnit === 'oz' && toUnit === 'g') return weight * GRAMS_PER_OUNCE;
+  if (fromUnit === 'g' && toUnit === 'oz') return weight / GRAMS_PER_OUNCE;
+  return weight;
+};
+
+export const getDashboardStats = async (req: Request, res: Response): Promise<void> => {
+  try {
+    // Only admins can access dashboard stats
+    if (req.user?.role !== 'admin') {
+      res.status(403).json({ error: 'Access denied. Admin only.' });
+      return;
+    }
+
+    // Get current month start and end dates
+    const now = new Date();
+    const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+    // 1. Total invested amount: sum of all subscriptions' accumulatedValue
+    const totalInvestedResult = await Subscription.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalInvested: { $sum: '$accumulatedValue' },
+        },
+      },
+    ]);
+
+    const totalInvested = totalInvestedResult[0]?.totalInvested || 0;
+
+    // 2. Monthly invested: sum of successful subscription orders in current month
+    const monthlyInvestedResult = await Order.aggregate([
+      {
+        $match: {
+          orderType: 'subscription',
+          paymentStatus: 'succeeded',
+          createdAt: {
+            $gte: currentMonthStart,
+            $lte: currentMonthEnd,
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          monthlyInvested: { $sum: '$amount' },
+        },
+      },
+    ]);
+
+    const monthlyInvested = monthlyInvestedResult[0]?.monthlyInvested || 0;
+
+    // 3. Number of users
+    const userCount = await User.countDocuments({});
+
+    res.json({
+      totalInvested,
+      monthlyInvested,
+      userCount,
+    });
+  } catch (error: any) {
+    console.error('Get dashboard stats error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+};
+
+export const getUserDashboardStats = async (req: Request, res: Response): Promise<void> => {
+  try {
+    if (!req.user?.userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    const userId = new mongoose.Types.ObjectId(req.user.userId);
+
+    // Define cancelled statuses
+    const cancelledStatuses = ['canceled', 'incomplete_expired'];
+
+    // 1. Total invested: sum of all subscriptions' accumulatedValue for this user
+    const totalInvestedResult = await Subscription.aggregate([
+      {
+        $match: {
+          userId: userId,
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalInvested: { $sum: '$accumulatedValue' },
+        },
+      },
+    ]);
+
+    const totalInvested = totalInvestedResult[0]?.totalInvested || 0;
+
+    // 2. Current Investment: sum of accumulatedValue for active subscriptions (excluding cancelled)
+    const currentInvestmentResult = await Subscription.aggregate([
+      {
+        $match: {
+          userId: userId,
+          status: { $nin: cancelledStatuses },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          currentInvestment: { $sum: '$accumulatedValue' },
+        },
+      },
+    ]);
+
+    const currentInvestment = currentInvestmentResult[0]?.currentInvestment || 0;
+
+    // 3. Accumulated Gold: sum of accumulatedWeight for gold subscriptions that are active
+    const goldSubscriptions = await Subscription.find({
+      userId: userId,
+      metal: 'gold',
+      status: { $nin: cancelledStatuses },
+    }).select('accumulatedWeight targetUnit');
+
+    let accumulatedGold = 0;
+    goldSubscriptions.forEach((sub) => {
+      // Convert all gold weights to grams for consistency
+      const weightInGrams = convertToStandardUnit(
+        sub.accumulatedWeight || 0,
+        sub.targetUnit || 'g',
+        'g'
+      );
+      accumulatedGold += weightInGrams;
+    });
+
+    // 4. Accumulated Silver: sum of accumulatedWeight for silver subscriptions that are active
+    const silverSubscriptions = await Subscription.find({
+      userId: userId,
+      metal: 'silver',
+      status: { $nin: cancelledStatuses },
+    }).select('accumulatedWeight targetUnit');
+
+    let accumulatedSilver = 0;
+    silverSubscriptions.forEach((sub) => {
+      // Convert all silver weights to ounces for consistency
+      const weightInOz = convertToStandardUnit(
+        sub.accumulatedWeight || 0,
+        sub.targetUnit || 'oz',
+        'oz'
+      );
+      accumulatedSilver += weightInOz;
+    });
+
+    res.json({
+      totalInvested,
+      currentInvestment,
+      accumulatedGold,
+      accumulatedSilver,
+    });
+  } catch (error: any) {
+    console.error('Get user dashboard stats error:', error);
+    res.status(500).json({ error: error.message || 'Server error' });
+  }
+};

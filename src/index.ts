@@ -14,6 +14,7 @@ import cancellationRequestRoutes from './routes/cancellationRequests';
 import withdrawalRequestRoutes from './routes/withdrawalRequests';
 import metalPriceRoutes from './routes/metalPrices';
 import orderRoutes from './routes/orders';
+import dashboardRoutes from './routes/dashboard';
 import { startMetalPriceCron } from './jobs/metalPriceScheduler';
 import { ensureFreshMetalPrices } from './controllers/metalPriceController';
 
@@ -71,6 +72,7 @@ app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/metal-prices', metalPriceRoutes);
 app.use('/api/cancellation-requests', cancellationRequestRoutes);
 app.use('/api/withdrawal-requests', withdrawalRequestRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 
 // Health check route
 app.get('/api/health', (_req, res) => {
