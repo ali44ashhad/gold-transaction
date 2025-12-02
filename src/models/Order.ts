@@ -58,6 +58,7 @@ export interface SubscriptionConfig {
 
 export interface IOrder extends Document {
   user?: mongoose.Types.ObjectId;
+  subscriptionId?: mongoose.Types.ObjectId; // Reference to Subscription (required for subscription orders)
   orderType: OrderType;
   amount: number; // major units (e.g. INR)
   amountInMinor: number; // minor units (e.g. paise)
@@ -87,6 +88,12 @@ export interface IOrder extends Document {
 const OrderSchema = new Schema<IOrder>(
   {
     user: { type: Schema.Types.ObjectId, ref: 'User', required: false },
+    subscriptionId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Subscription',
+      required: false,
+      index: true,
+    },
     orderType: { type: String, enum: orderTypes, default: 'subscription' },
     amount: { type: Number, required: true },
     amountInMinor: { type: Number, required: true },

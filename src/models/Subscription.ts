@@ -15,7 +15,6 @@ export type SubscriptionStatus =
 
 export interface ISubscription extends Document {
   userId: mongoose.Types.ObjectId;
-  orderId?: mongoose.Types.ObjectId;
   metal: MetalType;
   planName: string;
   targetWeight: number;
@@ -38,11 +37,6 @@ const SubscriptionSchema = new Schema<ISubscription>({
     type: Schema.Types.ObjectId,
     ref: 'User',
     required: true,
-    index: true,
-  },
-  orderId: {
-    type: Schema.Types.ObjectId,
-    ref: 'Order',
     index: true,
   },
   metal: {

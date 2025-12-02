@@ -132,9 +132,34 @@ export const syncSubscriptionFromOrder = async (
   }
 
   const config = buildConfigFromOrder(order);
-  const subscriptionId = order.stripeSubscriptionId ?? options.stripeSubscriptionId;
-  const filter = subscriptionId ? { stripeSubscriptionId: subscriptionId } : { orderId: order._id };
+  const stripeSubscriptionId = order.stripeSubscriptionId ?? options.stripeSubscriptionId;
+  
+  // Find or create subscription based on stripeSubscriptionId (preferred) or user+config
+  let subscription: ISubscription | null = null;
+  
+  if (stripeSubscriptionId) {
+    // First, try to find by stripeSubscriptionId
+    subscription = await Subscription.findOne({ stripeSubscriptionId });
+  }
+  
+  // If not found and order already has a subscriptionId, use that
+  if (!subscription && order.subscriptionId) {
+    subscription = await Subscription.findById(order.subscriptionId);
+  }
+  
+  // If still not found, try to find by user and matching config (for same subscription plan)
+  if (!subscription && order.user) {
+    subscription = await Subscription.findOne({
+      userId: order.user,
+      stripeCustomerId: order.stripeCustomerId,
+      metal: config.metal,
+      planName: config.planName,
+      targetWeight: config.targetWeight,
+      targetUnit: config.targetUnit,
+    });
+  }
 
+  // Prepare update data
   const update: Record<string, any> = {
     $set: {
       planName: config.planName,
@@ -145,7 +170,6 @@ export const syncSubscriptionFromOrder = async (
       quantity: config.quantity,
       targetPrice: config.targetPrice,
       stripeCustomerId: order.stripeCustomerId,
-      orderId: order._id,
       status: options.status ?? 'pending_payment',
     },
     $setOnInsert: {
@@ -153,8 +177,8 @@ export const syncSubscriptionFromOrder = async (
     },
   };
 
-  if (subscriptionId) {
-    update.$set.stripeSubscriptionId = subscriptionId;
+  if (stripeSubscriptionId) {
+    update.$set.stripeSubscriptionId = stripeSubscriptionId;
   }
 
   if (options.currentPeriodEnd) {
@@ -179,11 +203,39 @@ export const syncSubscriptionFromOrder = async (
     };
   }
 
-  return Subscription.findOneAndUpdate(filter, update, {
-    upsert: true,
-    new: true,
-    setDefaultsOnInsert: true,
-  });
+  // Find or create subscription
+  if (subscription) {
+    // Update existing subscription
+    Object.assign(subscription, update.$set);
+    if (update.$inc) {
+      subscription.accumulatedValue = (subscription.accumulatedValue || 0) + (update.$inc.accumulatedValue || 0);
+      subscription.accumulatedWeight = (subscription.accumulatedWeight || 0) + (update.$inc.accumulatedWeight || 0);
+    }
+    await subscription.save();
+    
+    // Link order to subscription if not already linked
+    const subscriptionId = new mongoose.Types.ObjectId(subscription.id);
+    if (!order.subscriptionId || order.subscriptionId.toString() !== subscriptionId.toString()) {
+      order.subscriptionId = subscriptionId;
+      await order.save();
+    }
+    
+    return subscription;
+  } else {
+    // Create new subscription
+    const newSubscription = await Subscription.create({
+      userId: order.user,
+      ...update.$set,
+      accumulatedValue: update.$inc?.accumulatedValue || 0,
+      accumulatedWeight: update.$inc?.accumulatedWeight || 0,
+    });
+    
+    // Link order to subscription
+    order.subscriptionId = new mongoose.Types.ObjectId(newSubscription.id);
+    await order.save();
+    
+    return newSubscription;
+  }
 };
 
 const mapStripeSubscriptionStatus = (
@@ -250,6 +302,8 @@ export const applyStripeSubscriptionEvent = async (
     return updated;
   }
 
+  // If subscription not found by stripeSubscriptionId, try to find by orderId in metadata
+  // and sync from that order
   const orderId = subscription.metadata?.orderId;
   if (orderId && mongoose.Types.ObjectId.isValid(orderId)) {
     const order = await Order.findById(orderId);
