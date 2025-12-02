@@ -61,8 +61,8 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
 
     const monthlyInvested = monthlyInvestedResult[0]?.monthlyInvested || 0;
 
-    // 3. Number of users
-    const userCount = await User.countDocuments({});
+    // 3. Number of users (excluding admins)
+    const userCount = await User.countDocuments({ role: 'user' });
 
     res.json({
       totalInvested,
