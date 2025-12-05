@@ -50,12 +50,18 @@ export const getDashboardStats = async (req: Request, res: Response): Promise<vo
     const currentMonthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const currentMonthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-    // 1. Total invested amount: sum of all subscriptions' accumulatedValue
-    const totalInvestedResult = await Subscription.aggregate([
+    // 1. Total invested amount: sum of all successful subscription orders (actual money paid)
+    const totalInvestedResult = await Order.aggregate([
+      {
+        $match: {
+          orderType: 'subscription',
+          paymentStatus: 'succeeded',
+        },
+      },
       {
         $group: {
           _id: null,
-          totalInvested: { $sum: '$accumulatedValue' },
+          totalInvested: { $sum: '$amount' },
         },
       },
     ]);
