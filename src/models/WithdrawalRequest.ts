@@ -3,11 +3,11 @@ import type { MetalType, UnitType } from './Subscription';
 
 const withdrawalStatuses = [
   'pending',
-  'in_review',
   'approved',
   'processing',
+  'out_for_delivery',
+  'delivered',
   'rejected',
-  'completed',
 ] as const;
 
 // const fulfillmentMethods = [

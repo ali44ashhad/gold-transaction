@@ -53,8 +53,8 @@ export const processWithdrawalApproval = async (
       requestedUnit: withdrawalRequest.requestedUnit,
     });
 
-    // Check if already processed (status is completed/rejected, or subscription already has 0 accumulated weight)
-    if (['completed', 'rejected'].includes(withdrawalRequest.status)) {
+    // Check if already processed (status is delivered/rejected, or subscription already has 0 accumulated weight)
+    if (['delivered', 'rejected'].includes(withdrawalRequest.status)) {
       console.warn('[DEBUG] Withdrawal request already processed', {
         requestId: withdrawalRequest._id,
         status: withdrawalRequest.status,

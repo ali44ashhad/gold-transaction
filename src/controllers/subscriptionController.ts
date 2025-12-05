@@ -220,14 +220,14 @@ export const getSubscriptions = async (req: Request, res: Response): Promise<voi
 
     const cancellationRequests = (await CancellationRequest.find({
       subscriptionId: { $in: subscriptionIds },
-      status: { $nin: ['completed', 'rejected'] },
+      status: { $nin: ['rejected'] },
     })
       .select('_id subscriptionId status')
       .lean()) as unknown as CancellationRequestSummary[];
 
     const withdrawalRequests = (await WithdrawalRequest.find({
       subscriptionId: { $in: subscriptionIds },
-      status: { $nin: ['completed', 'rejected'] },
+      status: { $nin: ['delivered', 'rejected'] },
     })
       .select('_id subscriptionId status')
       .lean()) as unknown as WithdrawalRequestSummary[];
@@ -293,14 +293,14 @@ export const getSubscriptionById = async (req: Request, res: Response): Promise<
 
     const cancellationRequest = await CancellationRequest.findOne({
       subscriptionId: subscription._id,
-      status: { $nin: ['completed', 'rejected'] },
+      status: { $nin: ['rejected'] },
     })
       .select('_id status')
       .lean<Pick<ICancellationRequest, 'status'> & { _id: mongoose.Types.ObjectId }>();
 
     const withdrawalRequest = await WithdrawalRequest.findOne({
       subscriptionId: subscription._id,
-      status: { $nin: ['completed', 'rejected'] },
+      status: { $nin: ['delivered', 'rejected'] },
     })
       .select('_id status')
       .lean<Pick<IWithdrawalRequest, 'status'> & { _id: mongoose.Types.ObjectId }>();

@@ -56,7 +56,7 @@ export const createWithdrawalRequest = async (req: Request, res: Response): Prom
       }
 
       // Check for existing active withdrawal requests
-      const activeStatuses = ['pending', 'in_review', 'approved', 'processing'];
+      const activeStatuses = ['pending', 'approved', 'processing', 'out_for_delivery'];
       const existingRequest = await WithdrawalRequest.findOne({
         subscriptionId,
         status: { $in: activeStatuses },
@@ -220,7 +220,7 @@ export const updateWithdrawalRequest = async (req: Request, res: Response): Prom
       });
 
       try {
-        const result = await processWithdrawalApproval(request._id.toString(), req.user!.userId);
+        const result = await processWithdrawalApproval(String(request._id), req.user!.userId);
         console.log('[DEBUG] processWithdrawalApproval result', {
           requestId: request._id,
           success: result.success,

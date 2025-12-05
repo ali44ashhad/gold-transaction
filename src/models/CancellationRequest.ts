@@ -2,10 +2,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 const cancellationStatuses = [
   'pending',
-  'in_review',
   'approved',
   'rejected',
-  'completed',
 ] as const;
 
 export type CancellationRequestStatus = (typeof cancellationStatuses)[number];

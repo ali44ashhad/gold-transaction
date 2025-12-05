@@ -3,10 +3,8 @@ import { CancellationRequestStatus } from '../models/CancellationRequest';
 
 const allowedStatuses: CancellationRequestStatus[] = [
   'pending',
-  'in_review',
   'approved',
   'rejected',
-  'completed',
 ];
 
 export const cancellationRequestIdParamValidator = [

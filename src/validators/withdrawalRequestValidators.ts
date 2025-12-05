@@ -3,11 +3,11 @@ import { WithdrawalRequestStatus } from '../models/WithdrawalRequest';
 
 const allowedStatuses: WithdrawalRequestStatus[] = [
   'pending',
-  'in_review',
   'approved',
   'processing',
+  'out_for_delivery',
+  'delivered',
   'rejected',
-  'completed',
 ];
 
 export const withdrawalRequestIdParamValidator = [
