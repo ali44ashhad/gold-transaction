@@ -46,23 +46,10 @@ export const signup = async (req: Request, res: Response): Promise<void> => {
       console.warn('Failed to create UserRole entry:', roleError.message);
     }
 
-    // Generate JWT token
-    const token = generateToken({
-      userId: String(user._id),
-      email: user.email,
-      role: user.role,
-    });
-
-    // Set cookie
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-
+    // DO NOT generate JWT token - user must login separately
+    // Return success message indicating they should login
     res.status(201).json({
-      message: 'User created successfully',
+      message: 'User created successfully. Please login to continue.',
       user: {
         id: String(user._id),
         _id: String(user._id),
