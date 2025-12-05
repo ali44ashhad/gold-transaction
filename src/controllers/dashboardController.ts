@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { Subscription } from '../models/Subscription';
 import { Order } from '../models/Order';
 import { User } from '../models/User';
+import { MetalPrice } from '../models/MetalPrice';
 
 const GRAMS_PER_OUNCE = 31.1035;
 
@@ -12,6 +13,28 @@ const convertToStandardUnit = (weight: number, fromUnit: string, toUnit: string)
   if (fromUnit === 'oz' && toUnit === 'g') return weight * GRAMS_PER_OUNCE;
   if (fromUnit === 'g' && toUnit === 'oz') return weight / GRAMS_PER_OUNCE;
   return weight;
+};
+
+// Helper function to get base unit for metal (gold = grams, silver = ounces)
+const getBaseUnitForMetal = (metal: 'gold' | 'silver'): 'g' | 'oz' => {
+  return metal === 'silver' ? 'oz' : 'g';
+};
+
+// Helper function to get current metal price per trade unit
+const getMetalPricePerTradeUnit = async (metal: 'gold' | 'silver'): Promise<number> => {
+  try {
+    const record = await MetalPrice.findOne({ metalSymbol: metal }).lean();
+    if (!record?.price || record.price <= 0) {
+      console.warn(`[Dashboard] Could not determine price for metal=${metal}`);
+      return 0;
+    }
+    // MetalPrice stores prices in base units (gold per gram, silver per ounce)
+    // which matches trade units, so we can return directly
+    return record.price;
+  } catch (error) {
+    console.error(`[Dashboard] Error fetching metal price for ${metal}:`, error);
+    return 0;
+  }
 };
 
 export const getDashboardStats = async (req: Request, res: Response): Promise<void> => {
@@ -87,40 +110,49 @@ export const getUserDashboardStats = async (req: Request, res: Response): Promis
     // Define cancelled statuses
     const cancelledStatuses = ['canceled', 'incomplete_expired'];
 
-    // 1. Total invested: sum of all subscriptions' accumulatedValue for this user
-    const totalInvestedResult = await Subscription.aggregate([
+    // 1. Total invested: sum of all successful subscription orders for this user
+    const totalInvestedResult = await Order.aggregate([
       {
         $match: {
-          userId: userId,
+          user: userId,
+          orderType: 'subscription',
+          paymentStatus: 'succeeded',
         },
       },
       {
         $group: {
           _id: null,
-          totalInvested: { $sum: '$accumulatedValue' },
+          totalInvested: { $sum: '$amount' },
         },
       },
     ]);
 
     const totalInvested = totalInvestedResult[0]?.totalInvested || 0;
 
-    // 2. Current Investment: sum of accumulatedValue for active subscriptions (excluding cancelled)
-    const currentInvestmentResult = await Subscription.aggregate([
-      {
-        $match: {
-          userId: userId,
-          status: { $nin: cancelledStatuses },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          currentInvestment: { $sum: '$accumulatedValue' },
-        },
-      },
-    ]);
+    // 2. Current Investment: sum of current market values (accumulatedWeight * currentMetalPrice) for active subscriptions
+    // Fetch current metal prices
+    const goldPricePerGram = await getMetalPricePerTradeUnit('gold');
+    const silverPricePerOz = await getMetalPricePerTradeUnit('silver');
 
-    const currentInvestment = currentInvestmentResult[0]?.currentInvestment || 0;
+    // Get all active subscriptions with their accumulated weight
+    const activeSubscriptions = await Subscription.find({
+      userId: userId,
+      status: { $nin: cancelledStatuses },
+    }).select('metal accumulatedWeight targetUnit');
+
+    let currentInvestment = 0;
+    activeSubscriptions.forEach((sub) => {
+      const tradeUnit = getBaseUnitForMetal(sub.metal);
+      const normalizedWeight = convertToStandardUnit(
+        sub.accumulatedWeight || 0,
+        sub.targetUnit || tradeUnit,
+        tradeUnit
+      );
+      
+      const pricePerUnit = sub.metal === 'gold' ? goldPricePerGram : silverPricePerOz;
+      const currentValue = normalizedWeight * pricePerUnit;
+      currentInvestment += currentValue;
+    });
 
     // 3. Accumulated Gold: sum of accumulatedWeight for gold subscriptions that are active
     const goldSubscriptions = await Subscription.find({

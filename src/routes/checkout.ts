@@ -711,8 +711,7 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
     }
 
     case 'customer.subscription.created':
-    case 'customer.subscription.updated':
-    case 'customer.subscription.deleted': {
+    case 'customer.subscription.updated': {
       const subscription = event.data.object as Stripe.Subscription;
       const { status, paymentStatus } = mapSubscriptionStatus(subscription.status);
       const update: Partial<IOrder> = {
@@ -738,6 +737,16 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
           metadataOrderId: subscription.metadata?.orderId,
         });
       }
+      await applyStripeSubscriptionEvent(subscription);
+      break;
+    }
+
+    case 'customer.subscription.deleted': {
+      // When a subscription is deleted/cancelled, only update the Subscription model.
+      // Do NOT update Orders because Orders represent immutable payment history.
+      // Successful payments should remain paymentStatus: 'succeeded' even after cancellation
+      // to preserve accurate Total Invested calculations.
+      const subscription = event.data.object as Stripe.Subscription;
       await applyStripeSubscriptionEvent(subscription);
       break;
     }
