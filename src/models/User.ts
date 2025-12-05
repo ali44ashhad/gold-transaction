@@ -20,6 +20,8 @@ export interface IUser extends Document {
   emailVerified: boolean;
   resetPasswordToken?: string;
   resetPasswordExpire?: Date;
+  withdrawnGold?: number;
+  withdrawnSilver?: number;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
@@ -85,6 +87,14 @@ const UserSchema = new Schema<IUser>({
   resetPasswordExpire: {
     type: Date,
     select: false,
+  },
+  withdrawnGold: {
+    type: Number,
+    default: 0,
+  },
+  withdrawnSilver: {
+    type: Number,
+    default: 0,
   },
 }, {
   timestamps: true,

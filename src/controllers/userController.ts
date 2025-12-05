@@ -44,6 +44,8 @@ export const updateProfile = async (req: Request, res: Response): Promise<void> 
         shippingAddress: user.shippingAddress,
         role: user.role,
         emailVerified: user.emailVerified,
+        withdrawnGold: user.withdrawnGold ?? 0,
+        withdrawnSilver: user.withdrawnSilver ?? 0,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },
@@ -102,6 +104,8 @@ export const updateUserRole = async (req: Request, res: Response): Promise<void>
         shippingAddress: user.shippingAddress,
         role: user.role,
         emailVerified: user.emailVerified,
+        withdrawnGold: user.withdrawnGold ?? 0,
+        withdrawnSilver: user.withdrawnSilver ?? 0,
       },
     });
   } catch (error: any) {
@@ -152,6 +156,8 @@ export const updateUser = async (req: Request, res: Response): Promise<void> => 
         shippingAddress: user.shippingAddress,
         role: user.role,
         emailVerified: user.emailVerified,
+        withdrawnGold: user.withdrawnGold ?? 0,
+        withdrawnSilver: user.withdrawnSilver ?? 0,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },

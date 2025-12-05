@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 
 import { stripe } from '../stripe';
 import { Order, IOrder, PaymentStatus } from '../models/Order';
+import { Subscription } from '../models/Subscription';
 import type { MetalType, UnitType } from '../models/Subscription';
 import { authenticate } from '../middleware/auth';
 import { notifyOps } from '../utils/alerting';
@@ -495,7 +496,7 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
         currency: invoice.currency ?? undefined,
       };
 
-      const updated = await updateOrderByLookup(
+      let updated = await updateOrderByLookup(
         {
           orderId: invoice.metadata?.orderId,
           stripeSubscriptionId: invoiceSubscriptionId,
@@ -504,6 +505,82 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
         update,
         context
       );
+
+      // If no order found and this is a subscription renewal, create a new order record
+      if (!updated && invoiceSubscriptionId) {
+        // Find the subscription to get user and subscription details
+        const subscription = await Subscription.findOne({ stripeSubscriptionId: invoiceSubscriptionId });
+        
+        if (subscription && subscription.userId) {
+          // Get the first order for this subscription to copy subscription config
+          const firstOrder = await Order.findOne({
+            stripeSubscriptionId: invoiceSubscriptionId,
+            orderType: 'subscription',
+          }).sort({ createdAt: 1 });
+
+          // Build subscription config from first order or subscription
+          const subscriptionConfig = firstOrder?.subscriptionConfig ? {
+            planName: firstOrder.subscriptionConfig.planName,
+            metal: firstOrder.subscriptionConfig.metal,
+            targetWeight: firstOrder.subscriptionConfig.targetWeight,
+            targetUnit: firstOrder.subscriptionConfig.targetUnit,
+            monthlyInvestment: firstOrder.subscriptionConfig.monthlyInvestment ?? amountPaidMajor,
+            quantity: firstOrder.subscriptionConfig.quantity,
+            targetPrice: firstOrder.subscriptionConfig.targetPrice,
+          } : {
+            planName: subscription.planName,
+            metal: subscription.metal,
+            targetWeight: subscription.targetWeight,
+            targetUnit: subscription.targetUnit,
+            monthlyInvestment: subscription.monthlyInvestment,
+            quantity: subscription.quantity,
+            targetPrice: subscription.targetPrice,
+          };
+
+          // Create new order for this renewal payment
+          const renewalOrder = await Order.create({
+            user: subscription.userId,
+            subscriptionId: subscription._id,
+            orderType: 'subscription',
+            amount: amountPaidMajor ?? 0,
+            amountInMinor: invoice.amount_paid ?? invoice.amount_due ?? 0,
+            currency: invoice.currency ?? 'inr',
+            status: 'paid',
+            paymentStatus: 'succeeded',
+            invoiceStatus: invoice.status ?? 'paid',
+            productName: subscriptionConfig.planName ?? DEFAULT_PRODUCT_NAME,
+            productDescription: `Subscription renewal payment - ${subscriptionConfig.planName}`,
+            billingEmail: invoice.customer_email ?? undefined,
+            stripeCustomerId: asStripeId(invoice.customer),
+            stripeSubscriptionId: invoiceSubscriptionId,
+            stripeInvoiceId: invoice.id,
+            stripePaymentIntentId: getInvoicePaymentIntentId(invoice),
+            receiptUrl: invoice.hosted_invoice_url ?? invoice.invoice_pdf ?? undefined,
+            subscriptionConfig,
+            metadata: {
+              ...sanitizeMetadata(invoice.metadata),
+              renewalPayment: 'true',
+              originalOrderId: firstOrder?.id?.toString(),
+            },
+            latestStripeEvent: event.type,
+            latestStripeEventId: context.eventId,
+            latestStripeEventReceivedAt: context.deliveredAt,
+          });
+
+          updated = renewalOrder;
+          console.info('Created new order for subscription renewal payment', {
+            orderId: renewalOrder.id,
+            invoiceId: invoice.id,
+            subscriptionId: invoiceSubscriptionId,
+            amount: amountPaidMajor,
+          });
+        } else {
+          console.warn('Stripe webhook: no subscription found for renewal payment', {
+            invoiceId: invoice.id,
+            subscriptionId: invoiceSubscriptionId,
+          });
+        }
+      }
 
       if (!updated) {
         console.warn('Stripe webhook: no order matched invoice.payment_succeeded', {
@@ -525,6 +602,10 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
       const invoice = event.data.object as Stripe.Invoice;
       const invoiceSubscriptionId = getInvoiceSubscriptionId(invoice);
       const periodEnd = getInvoicePeriodEndDate(invoice);
+      const amountDueMajor =
+        invoice.amount_due !== null && invoice.amount_due !== undefined
+          ? invoice.amount_due / 100
+          : undefined;
       const update: Partial<IOrder> = {
         latestStripeEvent: event.type,
         status: 'pending',
@@ -533,9 +614,12 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
         stripeInvoiceId: invoice.id,
         stripeSubscriptionId: invoiceSubscriptionId,
         stripeCustomerId: asStripeId(invoice.customer),
+        amount: amountDueMajor,
+        amountInMinor: invoice.amount_due ?? undefined,
+        currency: invoice.currency ?? undefined,
       };
 
-      const updated = await updateOrderByLookup(
+      let updated = await updateOrderByLookup(
         {
           orderId: invoice.metadata?.orderId,
           stripeSubscriptionId: invoiceSubscriptionId,
@@ -544,6 +628,72 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
         update,
         context
       );
+
+      // If no order found and this is a subscription renewal, create a new order record for failed payment
+      if (!updated && invoiceSubscriptionId) {
+        const subscription = await Subscription.findOne({ stripeSubscriptionId: invoiceSubscriptionId });
+        
+        if (subscription && subscription.userId) {
+          const firstOrder = await Order.findOne({
+            stripeSubscriptionId: invoiceSubscriptionId,
+            orderType: 'subscription',
+          }).sort({ createdAt: 1 });
+
+          const subscriptionConfig = firstOrder?.subscriptionConfig ? {
+            planName: firstOrder.subscriptionConfig.planName,
+            metal: firstOrder.subscriptionConfig.metal,
+            targetWeight: firstOrder.subscriptionConfig.targetWeight,
+            targetUnit: firstOrder.subscriptionConfig.targetUnit,
+            monthlyInvestment: firstOrder.subscriptionConfig.monthlyInvestment ?? amountDueMajor,
+            quantity: firstOrder.subscriptionConfig.quantity,
+            targetPrice: firstOrder.subscriptionConfig.targetPrice,
+          } : {
+            planName: subscription.planName,
+            metal: subscription.metal,
+            targetWeight: subscription.targetWeight,
+            targetUnit: subscription.targetUnit,
+            monthlyInvestment: subscription.monthlyInvestment,
+            quantity: subscription.quantity,
+            targetPrice: subscription.targetPrice,
+          };
+
+          const failedOrder = await Order.create({
+            user: subscription.userId,
+            subscriptionId: subscription._id,
+            orderType: 'subscription',
+            amount: amountDueMajor ?? 0,
+            amountInMinor: invoice.amount_due ?? 0,
+            currency: invoice.currency ?? 'inr',
+            status: 'pending',
+            paymentStatus: 'failed',
+            invoiceStatus: invoice.status ?? 'open',
+            productName: subscriptionConfig.planName ?? DEFAULT_PRODUCT_NAME,
+            productDescription: `Subscription renewal payment (failed) - ${subscriptionConfig.planName}`,
+            billingEmail: invoice.customer_email ?? undefined,
+            stripeCustomerId: asStripeId(invoice.customer),
+            stripeSubscriptionId: invoiceSubscriptionId,
+            stripeInvoiceId: invoice.id,
+            subscriptionConfig,
+            metadata: {
+              ...sanitizeMetadata(invoice.metadata),
+              renewalPayment: 'true',
+              paymentFailed: 'true',
+              originalOrderId: firstOrder?.id?.toString(),
+            },
+            latestStripeEvent: event.type,
+            latestStripeEventId: context.eventId,
+            latestStripeEventReceivedAt: context.deliveredAt,
+          });
+
+          updated = failedOrder;
+          console.info('Created new order for failed subscription renewal payment', {
+            orderId: failedOrder.id,
+            invoiceId: invoice.id,
+            subscriptionId: invoiceSubscriptionId,
+            amount: amountDueMajor,
+          });
+        }
+      }
 
       if (!updated) {
         console.warn('Stripe webhook: no order matched invoice.payment_failed', {
