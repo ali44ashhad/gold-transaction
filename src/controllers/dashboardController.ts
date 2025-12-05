@@ -158,11 +158,18 @@ export const getUserDashboardStats = async (req: Request, res: Response): Promis
       accumulatedSilver += weightInOz;
     });
 
+    // 5. Get withdrawn gold and silver from user record
+    const user = await User.findById(userId).select('withdrawnGold withdrawnSilver');
+    const withdrawnGold = user?.withdrawnGold || 0;
+    const withdrawnSilver = user?.withdrawnSilver || 0;
+
     res.json({
       totalInvested,
       currentInvestment,
       accumulatedGold,
       accumulatedSilver,
+      withdrawnGold,
+      withdrawnSilver,
     });
   } catch (error: any) {
     console.error('Get user dashboard stats error:', error);
