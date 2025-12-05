@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { CancellationRequest } from '../models/CancellationRequest';
 import { Subscription } from '../models/Subscription';
+import { User } from '../models/User';
 import { stripe } from '../stripe';
 
 const isAdmin = (req: Request): boolean => req.user?.role === 'admin';
@@ -8,6 +9,20 @@ const isAdmin = (req: Request): boolean => req.user?.role === 'admin';
 const canAccessRequest = (req: Request, ownerId: string): boolean => {
   if (isAdmin(req)) return true;
   return ownerId === req.user?.userId;
+};
+
+// Weight conversion helper (same as in withdrawalService)
+const OZ_IN_GRAMS = 31.1034768;
+
+const convertWeight = (weight: number, fromUnit: string, toUnit: string): number => {
+  if (fromUnit === toUnit) return weight;
+  if (fromUnit === 'oz' && toUnit === 'g') {
+    return weight * OZ_IN_GRAMS;
+  }
+  if (fromUnit === 'g' && toUnit === 'oz') {
+    return weight / OZ_IN_GRAMS;
+  }
+  return weight;
 };
 
 export const createCancellationRequest = async (req: Request, res: Response): Promise<void> => {
@@ -181,6 +196,10 @@ export const updateCancellationRequest = async (req: Request, res: Response): Pr
                 stripeSubscriptionId: subscription.stripeSubscriptionId,
                 currentStatus: subscription.status,
                 hasStripeSubscriptionId: !!subscription.stripeSubscriptionId,
+                accumulatedWeight: subscription.accumulatedWeight,
+                accumulatedValue: subscription.accumulatedValue,
+                metal: subscription.metal,
+                targetUnit: subscription.targetUnit,
               });
 
               // Cancel on Stripe if stripeSubscriptionId exists
@@ -244,6 +263,77 @@ export const updateCancellationRequest = async (req: Request, res: Response): Pr
                 subscriptionId: subscription._id,
                 cancellationRequestId: request._id,
               });
+
+              // Update user's withdrawn metal amounts with accumulated weight
+              if (subscription.accumulatedWeight > 0) {
+                console.log('[DEBUG] Updating user withdrawn metal amounts', {
+                  userId: request.userId,
+                  subscriptionId: subscription._id,
+                  accumulatedWeight: subscription.accumulatedWeight,
+                  targetUnit: subscription.targetUnit,
+                  metal: subscription.metal,
+                });
+
+                const user = await User.findById(request.userId);
+                if (!user) {
+                  console.warn('[DEBUG] User not found for updating withdrawn metal', {
+                    userId: request.userId,
+                    cancellationRequestId: request._id,
+                  });
+                } else {
+                  // Convert accumulated weight to standard units:
+                  // - Gold: convert to grams (g)
+                  // - Silver: convert to ounces (oz)
+                  const withdrawnWeightInStandardUnit = subscription.metal === 'gold'
+                    ? convertWeight(subscription.accumulatedWeight, subscription.targetUnit, 'g')
+                    : convertWeight(subscription.accumulatedWeight, subscription.targetUnit, 'oz');
+
+                  console.log('[DEBUG] Converting accumulated weight to standard unit', {
+                    metal: subscription.metal,
+                    accumulatedWeight: subscription.accumulatedWeight,
+                    targetUnit: subscription.targetUnit,
+                    standardUnit: subscription.metal === 'gold' ? 'g' : 'oz',
+                    convertedWeight: withdrawnWeightInStandardUnit,
+                  });
+
+                  // Update user's withdrawn metal amount
+                  const previousWithdrawnGold = user.withdrawnGold || 0;
+                  const previousWithdrawnSilver = user.withdrawnSilver || 0;
+
+                  if (subscription.metal === 'gold') {
+                    user.withdrawnGold = (user.withdrawnGold || 0) + withdrawnWeightInStandardUnit;
+                    console.info('[DEBUG] Updated withdrawnGold', {
+                      userId: user._id,
+                      previousAmount: previousWithdrawnGold,
+                      addedAmount: withdrawnWeightInStandardUnit,
+                      newAmount: user.withdrawnGold,
+                      cancellationRequestId: request._id,
+                    });
+                  } else {
+                    user.withdrawnSilver = (user.withdrawnSilver || 0) + withdrawnWeightInStandardUnit;
+                    console.info('[DEBUG] Updated withdrawnSilver', {
+                      userId: user._id,
+                      previousAmount: previousWithdrawnSilver,
+                      addedAmount: withdrawnWeightInStandardUnit,
+                      newAmount: user.withdrawnSilver,
+                      cancellationRequestId: request._id,
+                    });
+                  }
+
+                  await user.save();
+                  console.info('User withdrawn metal amounts updated', {
+                    userId: user._id,
+                    cancellationRequestId: request._id,
+                    withdrawnGold: user.withdrawnGold,
+                    withdrawnSilver: user.withdrawnSilver,
+                  });
+                }
+              } else {
+                console.log('[DEBUG] No accumulated weight to transfer', {
+                  subscriptionId: subscription._id,
+                  accumulatedWeight: subscription.accumulatedWeight,
+                });
+              }
             }
           } catch (subscriptionError: any) {
             console.error('[DEBUG] Error processing subscription cancellation', {
