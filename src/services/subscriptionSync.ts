@@ -5,6 +5,7 @@ import { Subscription, ISubscription, MetalType, UnitType, SubscriptionStatus } 
 import { MetalPrice } from '../models/MetalPrice';
 import { IOrder } from '../models/Order';
 import { Order } from '../models/Order';
+import { WithdrawalRequest } from '../models/WithdrawalRequest';
 
 type SubscriptionSyncOptions = {
   status?: SubscriptionStatus;
@@ -204,6 +205,7 @@ export const syncSubscriptionFromOrder = async (
   }
 
   // Find or create subscription
+  let savedSubscription: ISubscription;
   if (subscription) {
     // Update existing subscription
     Object.assign(subscription, update.$set);
@@ -212,6 +214,7 @@ export const syncSubscriptionFromOrder = async (
       subscription.accumulatedWeight = (subscription.accumulatedWeight || 0) + (update.$inc.accumulatedWeight || 0);
     }
     await subscription.save();
+    savedSubscription = subscription;
     
     // Link order to subscription if not already linked
     const subscriptionId = new mongoose.Types.ObjectId(subscription.id);
@@ -219,8 +222,6 @@ export const syncSubscriptionFromOrder = async (
       order.subscriptionId = subscriptionId;
       await order.save();
     }
-    
-    return subscription;
   } else {
     // Create new subscription
     const newSubscription = await Subscription.create({
@@ -229,13 +230,74 @@ export const syncSubscriptionFromOrder = async (
       accumulatedValue: update.$inc?.accumulatedValue || 0,
       accumulatedWeight: update.$inc?.accumulatedWeight || 0,
     });
+    savedSubscription = newSubscription;
     
     // Link order to subscription
     order.subscriptionId = new mongoose.Types.ObjectId(newSubscription.id);
     await order.save();
-    
-    return newSubscription;
   }
+
+  // Auto-create withdrawal request if accumulated weight >= target weight
+  try {
+    // Check if subscription status is active or trialing
+    if (['active', 'trialing'].includes(savedSubscription.status)) {
+      // Check if accumulated weight >= target weight
+      if (savedSubscription.accumulatedWeight >= savedSubscription.targetWeight) {
+        // Check if no active withdrawal request exists
+        const activeStatuses = ['pending', 'approved', 'processing', 'out_for_delivery'];
+        const existingRequest = await WithdrawalRequest.findOne({
+          subscriptionId: savedSubscription._id,
+          status: { $in: activeStatuses },
+        });
+
+        if (!existingRequest) {
+          // Calculate estimated value using current metal price
+          const pricePerUnit = await getMetalPricePerUnit(
+            savedSubscription.metal,
+            savedSubscription.targetUnit
+          );
+
+          const estimatedValue = pricePerUnit
+            ? savedSubscription.accumulatedWeight * pricePerUnit
+            : undefined;
+
+          // Auto-create withdrawal request
+          const withdrawalRequest = await WithdrawalRequest.create({
+            userId: savedSubscription.userId,
+            subscriptionId: savedSubscription._id,
+            metal: savedSubscription.metal,
+            requestedWeight: savedSubscription.accumulatedWeight,
+            requestedUnit: savedSubscription.targetUnit,
+            estimatedValue,
+            notes: 'Auto-created when target weight reached',
+            status: 'pending',
+          });
+
+          console.log('[SubscriptionSync] Auto-created withdrawal request', {
+            withdrawalRequestId: withdrawalRequest._id,
+            subscriptionId: savedSubscription._id,
+            accumulatedWeight: savedSubscription.accumulatedWeight,
+            targetWeight: savedSubscription.targetWeight,
+            estimatedValue,
+          });
+        } else {
+          console.log('[SubscriptionSync] Skipping auto-creation - active withdrawal request already exists', {
+            subscriptionId: savedSubscription._id,
+            existingRequestId: existingRequest._id,
+          });
+        }
+      }
+    }
+  } catch (error: any) {
+    // Log error but don't fail subscription sync if withdrawal creation fails
+    console.error('[SubscriptionSync] Error auto-creating withdrawal request', {
+      subscriptionId: savedSubscription._id,
+      error: error.message,
+      stack: error.stack,
+    });
+  }
+
+  return savedSubscription;
 };
 
 const mapStripeSubscriptionStatus = (
