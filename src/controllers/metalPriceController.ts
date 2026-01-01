@@ -19,10 +19,10 @@ const getStartOfYesterdayUtc = (): Date => {
   return boundary;
 };
 
-const getPreviousDayString = (): string => {
-  const yesterday = new Date();
-  yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-  return yesterday.toISOString().slice(0, 10).replace(/-/g, '');
+const getDateStringDaysAgo = (daysAgo: number): string => {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() - daysAgo);
+  return date.toISOString().slice(0, 10).replace(/-/g, '');
 };
 
 const buildMetalUrl = (metalSymbol: 'gold' | 'silver', date: string): string => {
@@ -81,6 +81,51 @@ const fetchMetalPrice = async (
   return price;
 };
 
+const fetchMetalPriceWithRetry = async (
+  apiKey: string,
+  metalSymbol: 'gold' | 'silver',
+  maxRetries: number = 10,
+): Promise<number> => {
+  let lastError: Error | null = null;
+
+  for (let daysAgo = 1; daysAgo <= maxRetries; daysAgo++) {
+    const dateString = getDateStringDaysAgo(daysAgo);
+    const url = buildMetalUrl(metalSymbol, dateString);
+
+    try {
+      const price = await fetchMetalPrice(url, apiKey, metalSymbol);
+      // Check if price is 0 - treat as invalid and try next day
+      if (price === 0) {
+        lastError = new Error(`Zero price returned for ${metalSymbol} on date ${dateString}`);
+        continue;
+      }
+      // If we get here, we have a valid non-zero price
+      return price;
+    } catch (error: any) {
+      lastError = error;
+      // Check if the error is about invalid/null data or non-200 status
+      // In these cases, try the next day
+      const isDataError =
+        error?.message?.includes('Invalid') ||
+        error?.message?.includes('null') ||
+        error?.message?.includes('failed with status');
+
+      if (!isDataError && daysAgo === maxRetries) {
+        // For non-data errors (like API quota), throw immediately on last retry
+        throw error;
+      }
+      // Continue to next day for data errors or if not the last retry
+      continue;
+    }
+  }
+
+  // If we exhausted all retries, throw an error
+  const errorMessage = lastError
+    ? `Unable to fetch valid ${metalSymbol} price after trying ${maxRetries} days: ${lastError.message}`
+    : `Unable to fetch valid ${metalSymbol} price after trying ${maxRetries} days`;
+  throw new Error(errorMessage);
+};
+
 export const getMetalPrices = async (_req: Request, res: Response): Promise<void> => {
   try {
     const prices = await MetalPrice.find().sort({ metalSymbol: 1 });
@@ -103,11 +148,9 @@ export const runMetalPriceSync = async (): Promise<MetalPriceSyncResult> => {
     throw new Error('Gold API key is not configured');
   }
 
-  const dateString = getPreviousDayString();
-
   const [goldPrice, silverPrice] = await Promise.all([
-    fetchMetalPrice(buildMetalUrl('gold', dateString), apiKey, 'gold'),
-    fetchMetalPrice(buildMetalUrl('silver', dateString), apiKey, 'silver'),
+    fetchMetalPriceWithRetry(apiKey, 'gold'),
+    fetchMetalPriceWithRetry(apiKey, 'silver'),
   ]);
 
   const timestamp = new Date();
