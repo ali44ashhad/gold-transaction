@@ -16,6 +16,7 @@ import metalPriceRoutes from './routes/metalPrices';
 import orderRoutes from './routes/orders';
 import dashboardRoutes from './routes/dashboard';
 import { startMetalPriceCron } from './jobs/metalPriceScheduler';
+import { startCheckoutSessionCleanupCron } from './jobs/checkoutSessionCleanup';
 import { ensureFreshMetalPrices } from './controllers/metalPriceController';
 
 dotenv.config();
@@ -38,6 +39,7 @@ connectDB()
     }
 
     startMetalPriceCron();
+    startCheckoutSessionCleanupCron();
   })
   .catch((error) => {
     console.error('Failed to connect to database:', error);
