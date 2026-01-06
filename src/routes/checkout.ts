@@ -279,6 +279,7 @@ type OrderLookup = {
   stripeSessionId?: string | null;
   stripeSubscriptionId?: string | null;
   stripeInvoiceId?: string | null;
+  stripePaymentIntentId?: string | null;
 };
 
 const mapSubscriptionStatus = (
@@ -325,6 +326,9 @@ export const updateOrderByLookup = async (
   }
   if (lookup.stripeInvoiceId) {
     filters.push({ stripeInvoiceId: lookup.stripeInvoiceId });
+  }
+  if (lookup.stripePaymentIntentId) {
+    filters.push({ stripePaymentIntentId: lookup.stripePaymentIntentId });
   }
 
   for (const filter of filters) {
@@ -398,9 +402,8 @@ const harmlessStripeEvents = new Set<string>([
   'charge.failed',
   'payment_method.attached',
   'payment_method.detached',
-  'payment_intent.created',
+  // 'payment_intent.created' - REMOVED: we need to handle this to link payment intents early
   'payment_intent.succeeded',
-  'payment_intent.payment_failed',
   'customer.created',
   'customer.updated',
   'invoice.created',
@@ -431,10 +434,11 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session;
+      const isUnpaid = session.payment_status === 'unpaid';
       const update: Partial<IOrder> = {
         latestStripeEvent: event.type,
-        status: session.payment_status === 'paid' ? 'paid' : 'pending',
-        paymentStatus: buildPaymentStatus(session.payment_status),
+        status: isUnpaid ? 'cancelled' : session.payment_status === 'paid' ? 'paid' : 'pending',
+        paymentStatus: isUnpaid ? 'failed' : buildPaymentStatus(session.payment_status),
         billingEmail: session.customer_details?.email ?? undefined,
         billingName: session.customer_details?.name ?? undefined,
         stripeCustomerId: asStripeId(session.customer),
@@ -466,8 +470,436 @@ export const processStripeEvent = async (event: Stripe.Event): Promise<void> => 
         });
       } else if (updated.orderType === 'subscription') {
         await syncSubscriptionFromOrder(updated, {
-          status: 'pending_payment',
+          status: isUnpaid ? 'past_due' : 'pending_payment',
           stripeSubscriptionId: asStripeId(session.subscription),
+        });
+      }
+      break;
+    }
+
+    case 'checkout.session.async_payment_failed': {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const update: Partial<IOrder> = {
+        latestStripeEvent: event.type,
+        status: 'cancelled',
+        paymentStatus: 'failed',
+        billingEmail: session.customer_details?.email ?? undefined,
+        billingName: session.customer_details?.name ?? undefined,
+        stripeCustomerId: asStripeId(session.customer),
+        stripeSubscriptionId: asStripeId(session.subscription),
+        stripePaymentIntentId: asStripeId(session.payment_intent as any),
+        stripeInvoiceId: asStripeId(session.invoice as any),
+        amountInMinor: session.amount_total ?? undefined,
+        amount:
+          session.amount_total !== null && session.amount_total !== undefined
+            ? session.amount_total / 100
+            : undefined,
+        currency: session.currency ?? undefined,
+      };
+
+      const updated = await updateOrderByLookup(
+        {
+          orderId: session.metadata?.orderId,
+          stripeSessionId: session.id,
+          stripeSubscriptionId: asStripeId(session.subscription),
+        },
+        update,
+        context
+      );
+
+      if (!updated) {
+        console.warn('Stripe webhook: no order matched checkout.session.async_payment_failed', {
+          sessionId: session.id,
+          metadataOrderId: session.metadata?.orderId,
+        });
+      } else if (updated.orderType === 'subscription') {
+        await syncSubscriptionFromOrder(updated, {
+          status: 'past_due',
+          stripeSubscriptionId: asStripeId(session.subscription),
+        });
+      }
+      break;
+    }
+
+    case 'payment_intent.created': {
+      const paymentIntent = event.data.object as Stripe.PaymentIntent;
+      
+      // Retrieve full payment intent to get all details
+      let fullPaymentIntent: Stripe.PaymentIntent;
+      try {
+        fullPaymentIntent = await stripe.paymentIntents.retrieve(paymentIntent.id, {
+          expand: ['invoice', 'customer'],
+        });
+      } catch (error) {
+        console.error('Stripe webhook: failed to retrieve payment intent', {
+          paymentIntentId: paymentIntent.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        break;
+      }
+
+      // Try to find the order and link the payment intent early
+      // This creates the link we need for payment_intent.payment_failed
+      const sessionId = fullPaymentIntent.metadata?.checkout_session_id;
+      const orderIdFromMetadata = fullPaymentIntent.metadata?.orderId;
+
+      // Strategy 1: Find by orderId from metadata
+      let updated: IOrder | null = null;
+      if (orderIdFromMetadata && mongoose.Types.ObjectId.isValid(orderIdFromMetadata)) {
+        updated = await Order.findById(orderIdFromMetadata);
+      }
+
+      // Strategy 2: Find by session ID from metadata
+      if (!updated && sessionId) {
+        updated = await Order.findOne({ stripeSessionId: sessionId });
+      }
+
+      // Strategy 3: If we have a customer, find pending orders and check their sessions
+      if (!updated && fullPaymentIntent.customer) {
+        const customerId = typeof fullPaymentIntent.customer === 'string' 
+          ? fullPaymentIntent.customer 
+          : fullPaymentIntent.customer.id;
+        
+        const pendingOrders = await Order.find({
+          $or: [
+            { stripeCustomerId: customerId },
+            { stripeCustomerId: { $exists: false } },
+            { stripeCustomerId: null },
+          ],
+          status: 'pending',
+          latestStripeEvent: 'checkout.session.created',
+          stripeSessionId: { $exists: true, $ne: null },
+        }).limit(10);
+
+        for (const order of pendingOrders) {
+          if (!order.stripeSessionId) continue;
+          
+          try {
+            const session = await stripe.checkout.sessions.retrieve(order.stripeSessionId);
+            const sessionPaymentIntentId = typeof session.payment_intent === 'string'
+              ? session.payment_intent
+              : session.payment_intent?.id;
+            
+            if (sessionPaymentIntentId === fullPaymentIntent.id) {
+              updated = order;
+              break;
+            }
+          } catch (error) {
+            // Continue to next order if session retrieval fails
+            continue;
+          }
+        }
+      }
+
+      // If we found the order, link the payment intent immediately
+      if (updated) {
+        // Check for duplicate event
+        if (context && updated.latestStripeEventId === context.eventId) {
+          console.info('Stripe webhook: duplicate payment_intent.created event skipped', {
+            eventId: context.eventId,
+            orderId: updated.id,
+          });
+          break;
+        }
+
+        updated.stripePaymentIntentId = fullPaymentIntent.id;
+        if (!updated.stripeCustomerId && fullPaymentIntent.customer) {
+          updated.stripeCustomerId = typeof fullPaymentIntent.customer === 'string'
+            ? fullPaymentIntent.customer
+            : fullPaymentIntent.customer.id;
+        }
+        if (context) {
+          updated.latestStripeEvent = context.eventType;
+          updated.latestStripeEventId = context.eventId;
+          updated.latestStripeEventReceivedAt = context.deliveredAt;
+        }
+        await updated.save();
+        
+        console.log('Stripe webhook: linked payment_intent.created to order', {
+          orderId: updated.id,
+          paymentIntentId: fullPaymentIntent.id,
+          sessionId: updated.stripeSessionId,
+        });
+      } else {
+        console.debug('Stripe webhook: payment_intent.created - no order found to link', {
+          paymentIntentId: fullPaymentIntent.id,
+          sessionId,
+          metadataOrderId: orderIdFromMetadata,
+          customerId: typeof fullPaymentIntent.customer === 'string' 
+            ? fullPaymentIntent.customer 
+            : fullPaymentIntent.customer?.id,
+        });
+      }
+      break;
+    }
+
+    case 'payment_intent.payment_failed': {
+      const paymentIntent = event.data.object as Stripe.PaymentIntent;
+      
+      // Retrieve full payment intent to get all metadata and details
+      let fullPaymentIntent: Stripe.PaymentIntent;
+      try {
+        fullPaymentIntent = await stripe.paymentIntents.retrieve(paymentIntent.id, {
+          expand: ['invoice', 'customer'],
+        });
+      } catch (error) {
+        console.error('Stripe webhook: failed to retrieve payment intent', {
+          paymentIntentId: paymentIntent.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        break;
+      }
+
+      console.log('Stripe webhook: processing payment_intent.payment_failed', {
+        paymentIntentId: fullPaymentIntent.id,
+        customerId: typeof fullPaymentIntent.customer === 'string' 
+          ? fullPaymentIntent.customer 
+          : fullPaymentIntent.customer?.id,
+        metadata: fullPaymentIntent.metadata,
+      });
+
+      const sessionId = fullPaymentIntent.metadata?.checkout_session_id;
+      const orderIdFromMetadata = fullPaymentIntent.metadata?.orderId;
+      
+      const update: Partial<IOrder> = {
+        latestStripeEvent: event.type,
+        status: 'cancelled',
+        paymentStatus: 'failed',
+        stripePaymentIntentId: fullPaymentIntent.id,
+        stripeCustomerId: asStripeId(fullPaymentIntent.customer),
+      };
+
+      // Strategy 1: Direct lookup by payment intent ID (should work now thanks to payment_intent.created)
+      let updated = await updateOrderByLookup(
+        {
+          stripePaymentIntentId: fullPaymentIntent.id,
+        },
+        update,
+        context
+      );
+
+      if (updated) {
+        console.log('Stripe webhook: matched payment_intent.payment_failed via direct lookup (thanks to payment_intent.created)', {
+          orderId: updated.id,
+          paymentIntentId: fullPaymentIntent.id,
+        });
+      }
+
+      // Strategy 2: Try to find by session ID from metadata
+      if (!updated && sessionId) {
+        updated = await updateOrderByLookup(
+          {
+            stripeSessionId: sessionId,
+          },
+          update,
+          context
+        );
+      }
+
+      // Strategy 3: Try orderId from metadata
+      if (!updated && orderIdFromMetadata) {
+        updated = await updateOrderByLookup(
+          {
+            orderId: orderIdFromMetadata,
+          },
+          update,
+          context
+        );
+      }
+
+      // Strategy 3.5: If payment intent has an invoice, check invoice metadata for orderId
+      const paymentIntentWithInvoice = fullPaymentIntent as Stripe.PaymentIntent & {
+        invoice?: string | Stripe.Invoice | null;
+      };
+      if (!updated && paymentIntentWithInvoice.invoice) {
+        try {
+          const invoiceId = typeof paymentIntentWithInvoice.invoice === 'string'
+            ? paymentIntentWithInvoice.invoice
+            : paymentIntentWithInvoice.invoice.id;
+          const invoice = await stripe.invoices.retrieve(invoiceId);
+          const invoiceOrderId = invoice.metadata?.orderId;
+          
+          if (invoiceOrderId) {
+            updated = await updateOrderByLookup(
+              {
+                orderId: invoiceOrderId,
+              },
+              update,
+              context
+            );
+            
+            if (updated) {
+              console.log('Stripe webhook: matched payment_intent.payment_failed to order via invoice metadata', {
+                orderId: updated.id,
+                paymentIntentId: fullPaymentIntent.id,
+                invoiceId: invoiceId,
+              });
+            }
+          }
+        } catch (error) {
+          // Continue to next strategy if invoice retrieval fails
+          console.debug('Stripe webhook: failed to retrieve invoice for payment intent', {
+            paymentIntentId: fullPaymentIntent.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      // Strategy 4: If we have a customer ID, try multiple approaches to find the order
+      if (!updated && fullPaymentIntent.customer) {
+        const customerId = typeof fullPaymentIntent.customer === 'string' 
+          ? fullPaymentIntent.customer 
+          : fullPaymentIntent.customer.id;
+        
+        console.log('Stripe webhook: Strategy 4 - searching for orders with customer', {
+          customerId,
+          paymentIntentId: fullPaymentIntent.id,
+        });
+
+        // Strategy 4a: Find pending orders that already have this customer ID set
+        let pendingOrders = await Order.find({
+          stripeCustomerId: customerId,
+          status: 'pending',
+          latestStripeEvent: 'checkout.session.created',
+          stripeSessionId: { $exists: true, $ne: null },
+        }).limit(10);
+
+        // Strategy 4b: If no orders found, also check orders without stripeCustomerId set
+        // (customer might have been created during checkout)
+        if (pendingOrders.length === 0) {
+          pendingOrders = await Order.find({
+            status: 'pending',
+            latestStripeEvent: 'checkout.session.created',
+            stripeSessionId: { $exists: true, $ne: null },
+            $or: [
+              { stripeCustomerId: { $exists: false } },
+              { stripeCustomerId: null },
+            ],
+          }).limit(20); // Check more orders since we don't have customer filter
+        }
+
+        console.log('Stripe webhook: Strategy 4 - found pending orders to check', {
+          count: pendingOrders.length,
+          customerId,
+        });
+
+        // Check each order's checkout session to see if it has this payment intent
+        for (const order of pendingOrders) {
+          if (!order.stripeSessionId) continue;
+          
+          try {
+            const session = await stripe.checkout.sessions.retrieve(order.stripeSessionId);
+            
+            // Update order's customer ID if it's not set
+            if (!order.stripeCustomerId && session.customer) {
+              order.stripeCustomerId = typeof session.customer === 'string' 
+                ? session.customer 
+                : session.customer.id;
+            }
+            
+            const sessionPaymentIntentId = typeof session.payment_intent === 'string'
+              ? session.payment_intent
+              : session.payment_intent?.id;
+            
+            // Also check if session metadata has orderId that matches
+            const sessionOrderId = session.metadata?.orderId;
+            const orderMatches = sessionPaymentIntentId === fullPaymentIntent.id ||
+              (sessionOrderId && sessionOrderId === order.id.toString());
+            
+            if (orderMatches) {
+              // Found the matching order!
+              Object.assign(order, update);
+              if (context) {
+                order.latestStripeEvent = context.eventType;
+                order.latestStripeEventId = context.eventId;
+                order.latestStripeEventReceivedAt = context.deliveredAt;
+              }
+              await order.save();
+              updated = order;
+              console.log('Stripe webhook: matched payment_intent.payment_failed to order via checkout session lookup', {
+                orderId: order.id,
+                paymentIntentId: fullPaymentIntent.id,
+                sessionId: order.stripeSessionId,
+                matchedBy: sessionPaymentIntentId === fullPaymentIntent.id ? 'payment_intent' : 'orderId',
+              });
+              break;
+            }
+          } catch (error) {
+            // Continue to next order if session retrieval fails
+            console.debug('Stripe webhook: failed to retrieve checkout session', {
+              sessionId: order.stripeSessionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            continue;
+          }
+        }
+
+        // Strategy 4c: If still not found, query Stripe directly for checkout sessions
+        if (!updated) {
+          try {
+            console.log('Stripe webhook: Strategy 4c - querying Stripe for checkout sessions', {
+              customerId,
+              paymentIntentId: fullPaymentIntent.id,
+            });
+            
+            // List checkout sessions for this customer (limited to recent ones)
+            const sessions = await stripe.checkout.sessions.list({
+              customer: customerId,
+              limit: 10,
+            });
+
+            for (const session of sessions.data) {
+              const sessionPaymentIntentId = typeof session.payment_intent === 'string'
+                ? session.payment_intent
+                : session.payment_intent?.id;
+              
+              if (sessionPaymentIntentId === fullPaymentIntent.id) {
+                // Found the session! Now find the order by session ID
+                const orderIdFromSession = session.metadata?.orderId;
+                
+                if (orderIdFromSession) {
+                  updated = await updateOrderByLookup(
+                    {
+                      orderId: orderIdFromSession,
+                      stripeSessionId: session.id,
+                    },
+                    update,
+                    context
+                  );
+                  
+                  if (updated) {
+                    console.log('Stripe webhook: matched payment_intent.payment_failed to order via Stripe session list', {
+                      orderId: updated.id,
+                      paymentIntentId: fullPaymentIntent.id,
+                      sessionId: session.id,
+                    });
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.debug('Stripe webhook: failed to list checkout sessions', {
+              customerId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      if (!updated) {
+        console.warn('Stripe webhook: no order matched payment_intent.payment_failed', {
+          paymentIntentId: fullPaymentIntent.id,
+          sessionId,
+          metadataOrderId: orderIdFromMetadata,
+          customerId: typeof fullPaymentIntent.customer === 'string' 
+            ? fullPaymentIntent.customer 
+            : fullPaymentIntent.customer?.id,
+        });
+      } else if (updated.orderType === 'subscription') {
+        await syncSubscriptionFromOrder(updated, {
+          status: 'past_due',
+          stripeSubscriptionId: updated.stripeSubscriptionId,
         });
       }
       break;
