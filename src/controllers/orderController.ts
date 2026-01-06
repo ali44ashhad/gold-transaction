@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
-import { Order, IOrder } from '../models/Order';
+import { Order } from '../models/Order';
 import { Subscription } from '../models/Subscription';
 
 const asObjectId = (value?: string | null): mongoose.Types.ObjectId | undefined => {
@@ -42,7 +42,7 @@ export const getOrdersBySubscriptionId = async (req: Request, res: Response): Pr
     // First, try to find the subscription to verify it exists and user has access
     let subscription = null;
     const isMongoId = mongoose.Types.ObjectId.isValid(subscriptionId);
-    
+
     if (isMongoId) {
       subscription = await Subscription.findById(subscriptionId);
       console.log('[OrderController] Found subscription by MongoDB ID:', subscription ? 'yes' : 'no');
@@ -56,7 +56,7 @@ export const getOrdersBySubscriptionId = async (req: Request, res: Response): Pr
     if (subscription) {
       const subscriptionUserId = subscription.userId?.toString();
       const userUserId = req.user?.userId;
-      
+
       if (req.user?.role !== 'admin' && subscriptionUserId !== userUserId) {
         console.log('[OrderController] User does not have access to this subscription');
         res.status(403).json({ error: 'Access denied. You do not have permission to view orders for this subscription.' });
@@ -91,7 +91,7 @@ export const getOrdersBySubscriptionId = async (req: Request, res: Response): Pr
 
     // Parse and validate limit
     const parsedLimit = Number(limit);
-    const safeLimit = Number.isFinite(parsedLimit) 
+    const safeLimit = Number.isFinite(parsedLimit)
       ? Math.min(Math.max(parsedLimit, 1), 200) // Max 200 orders
       : 100;
 
@@ -114,12 +114,12 @@ export const getOrdersBySubscriptionId = async (req: Request, res: Response): Pr
       // Debug: Check if there are any orders at all
       const totalOrders = await Order.countDocuments({});
       console.log('[OrderController] Total orders in database:', totalOrders);
-      
+
       if (filter.user) {
         const userOrdersCount = await Order.countDocuments({ user: filter.user });
         console.log('[OrderController] Total orders for user:', userOrdersCount);
       }
-      
+
       // Check each condition separately
       for (const condition of orConditions) {
         const count = await Order.countDocuments(condition);
@@ -135,9 +135,9 @@ export const getOrdersBySubscriptionId = async (req: Request, res: Response): Pr
     });
   } catch (error: any) {
     console.error('[OrderController] Error fetching orders by subscription ID:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: error.message || 'Failed to fetch orders',
-      details: error.stack 
+      details: error.stack
     });
   }
 };

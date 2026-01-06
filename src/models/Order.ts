@@ -108,7 +108,7 @@ const OrderSchema = new Schema<IOrder>(
     stripeSessionId: { type: String, index: true },
     stripeCustomerId: { type: String, index: true },
     stripeSubscriptionId: { type: String, index: true },
-    stripePaymentIntentId: { type: String },
+    stripePaymentIntentId: { type: String, index: true },
     stripeInvoiceId: { type: String },
     receiptUrl: { type: String },
     latestStripeEvent: { type: String },

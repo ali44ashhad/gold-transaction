@@ -2,6 +2,8 @@
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import { connectDB } from './config/database';
@@ -22,6 +24,21 @@ import { ensureFreshMetalPrices } from './controllers/metalPriceController';
 dotenv.config();
 
 const app = express();
+const isDev = process.env.NODE_ENV !== 'production';
+
+// Security Headers
+app.use(helmet());
+
+// Rate Limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+// Apply rate limiting to all requests (or specific API routes)
+app.use('/api', limiter);
 const PORT = process.env.PORT || 5005;
 
 // Connect to MongoDB
@@ -54,13 +71,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
- 
+
 app.post(
   '/api/checkout/webhook',
   bodyParser.raw({ type: 'application/json' }),
   (req, res) => webhookHandler(req, res)
 );
- 
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
@@ -78,8 +95,8 @@ app.use('/api/dashboard', dashboardRoutes);
 
 // Health check route
 app.get('/api/health', (_req, res) => {
-  res.json({ 
-    status: 'OK', 
+  res.json({
+    status: 'OK',
     message: 'PharaohVault API is running',
     timestamp: new Date().toISOString(),
   });
@@ -90,7 +107,7 @@ app.get('/api/health/db', async (_req, res) => {
   try {
     const dbStatus = mongoose.connection.readyState;
     const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
-    
+
     res.json({
       status: 'OK',
       database: {
@@ -109,88 +126,90 @@ app.get('/api/health/db', async (_req, res) => {
 });
 
 
-app.get('/success', (req, res) => {
-  const sessionId = req.query.session_id;
+if (isDev) {
+  app.get('/success', (req, res) => {
+    const sessionId = req.query.session_id;
 
-  res.send(`
-    <html>
-      <head>
-        <title>Payment Successful</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            text-align: center;
-            margin-top: 100px;
-            color: #333;
-          }
-          .card {
-            max-width: 400px;
-            margin: auto;
-            padding: 30px;
-            border: 1px solid #ccc;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-          }
-          .success {
-            color: green;
-            font-size: 24px;
-            margin-bottom: 20px;
-          }
-          .session {
-            font-size: 14px;
-            margin-top: 10px;
-            color: #555;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <div class="success">🎉 Payment Successful 🎉</div>
-          <p>Thank you! Your payment has been received.</p>
-          <p class="session">Session ID:<br> <strong>${sessionId}</strong></p>
-        </div>
-      </body>
-    </html>
-  `);
-});
+    res.send(`
+      <html>
+        <head>
+          <title>Payment Successful</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              text-align: center;
+              margin-top: 100px;
+              color: #333;
+            }
+            .card {
+              max-width: 400px;
+              margin: auto;
+              padding: 30px;
+              border: 1px solid #ccc;
+              border-radius: 10px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .success {
+              color: green;
+              font-size: 24px;
+              margin-bottom: 20px;
+            }
+            .session {
+              font-size: 14px;
+              margin-top: 10px;
+              color: #555;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="success">🎉 Payment Successful 🎉</div>
+            <p>Thank you! Your payment has been received.</p>
+            <p class="session">Session ID:<br> <strong>${sessionId}</strong></p>
+          </div>
+        </body>
+      </html>
+    `);
+  });
 
 
-app.get('/cancel', (_req, res) => {
-  res.send(`
-    <html>
-      <head>
-        <title>Payment Cancelled</title>
-        <style>
-          body {
-            font-family: Arial, sans-serif;
-            text-align: center;
-            margin-top: 100px;
-            color: #333;
-          }
-          .card {
-            max-width: 400px;
-            margin: auto;
-            padding: 30px;
-            border: 1px solid #ccc;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-          }
-          .cancel {
-            color: red;
-            font-size: 24px;
-            margin-bottom: 20px;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <div class="cancel">❌ Payment Cancelled ❌</div>
-          <p>Your payment was not completed.</p>
-        </div>
-      </body>
-    </html>
-  `);
-});
+  app.get('/cancel', (_req, res) => {
+    res.send(`
+      <html>
+        <head>
+          <title>Payment Cancelled</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              text-align: center;
+              margin-top: 100px;
+              color: #333;
+            }
+            .card {
+              max-width: 400px;
+              margin: auto;
+              padding: 30px;
+              border: 1px solid #ccc;
+              border-radius: 10px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }
+            .cancel {
+              color: red;
+              font-size: 24px;
+              margin-bottom: 20px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="card">
+            <div class="cancel">❌ Payment Cancelled ❌</div>
+            <p>Your payment was not completed.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  });
+}
 
 // 404 handler
 app.use((_req, res) => {
